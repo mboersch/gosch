@@ -1,5 +1,6 @@
 package main
-
+//author: Marius Boerschig <code (at) boerschig (dot) net>
+//
 import (
     "crypto/tls"
     "strings"
@@ -9,11 +10,13 @@ import (
     "os"
     "os/exec"
     "io/ioutil"
-    "io"
+    "bufio"
     "bytes"
     "net"
     "strconv"
+    "time"
 )
+const ( timeout int  = 60 )
 type config struct {
     //config
     address  string
@@ -21,11 +24,33 @@ type config struct {
     certfile string
     doSelfsigned bool
 }
+type ircmessage struct {
+    raw string
+    prefix string
+    command string
+    trailing string
+    parameters []string
+}
+type ircchannel struct {
+    members map[string]*ircclient
+    topic string
+}
 type ircd struct {
     config config
     log    *log.Logger
+    channels []*ircchannel
+    clients []*ircclient
 }
-
+type ircclient struct {
+    server *ircd
+    conn *net.Conn
+    connected bool
+    done bool 
+    nickname string
+    ident string
+    id string //for logging/handling
+    lastPing time.Time
+}
 type ircError struct {
     code int
     msg string
@@ -91,7 +116,7 @@ func (self *ircd) parseArgs() error {
     }
     return nil
 }
-func New() *ircd {
+func NewServer() *ircd {
     rv := new(ircd)
     rv.log  = log.New(os.Stdout, "ircd ", log.LstdFlags)
     if err := rv.parseArgs(); err != nil {
@@ -121,15 +146,108 @@ func (self *ircd) run() {
             self.log.Printf("ERROR: cannot accept client %v", err)
             continue
         }
-        client := tls.Server(cl, cfg)
-        go func(c net.Conn) {
-            io.Copy(os.Stdout, c)
-            fmt.Println()
-            c.Close()
-        }(client)
+        tlsconn := tls.Server(cl, cfg)
+        client := NewClient(tlsconn, self)
+        go client.Run()
+        self.clients = append(self.clients, client)
+    }
+}
+
+func NewClient(conn net.Conn, server *ircd) *ircclient {
+    rv := new(ircclient)
+    rv.conn = &conn
+    rv.server = server
+    return rv
+}
+func (m *ircmessage) String() string {
+    var param strings.Builder
+    for _, b := range m.parameters {
+        param.WriteString(b)
+        param.WriteString("; ")
+    }
+    return fmt.Sprintf("Msg<pref=\"%s\",cmd=\"%s\",param=\"%s\",trail=\"%s\">",
+            m.prefix, m.command, param.String(), m.trailing)
+}
+func ircParseMessage( raw string) (msg *ircmessage, err error) {
+    if len(raw) < 3  {
+        return nil, nil
+    }
+    var idx int = -1
+    rv := new(ircmessage)
+    rv.raw = raw
+    //fmt.Printf("raw=%s\n", raw)
+    //colon starts the prefix, up to whitespace
+    if raw[0] == ':' {
+        idx = strings.Index(raw, " ")
+        if idx == -1  {
+            return nil, ircError{-1, "prefix started but no end"}
+        }
+        rv.prefix=raw[0:idx]
+        raw=raw[idx:]
+        //fmt.Printf("raw1=%s\n", raw)
+    }
+    if idx = strings.Index(raw, " "); idx == -1 {
+            return nil, ircError{-1, "command has no end"}
+    }
+    //purge whitespace
+    raw = strings.TrimLeft(raw, " ")
+    //command up to whitespace
+    rv.command = raw[0:idx]
+    //fmt.Printf("raw2=%s\n", raw)
+    raw = raw[idx:]
+    //params, muliple whitespace separated, trailer might be ":" separated
+    idx = strings.Index(raw, ":")
+    if idx != -1 {
+        rv.trailing = raw[idx+1:]
+        raw = raw[0:idx]
+        //fmt.Printf("raw3=%s\n", raw)
+    }
+    tmp := strings.Split(raw, " ")
+    for _, t := range tmp {
+        if len(t) > 0 {
+            rv.parameters = append(rv.parameters, t)
+        }
+    }
+
+    return rv, nil
+}
+func (self *ircclient) Kill() {
+    self.done = true
+    self.connected = false
+}
+func (self *ircclient) Run() {
+    scanner := bufio.NewScanner(*self.conn)
+    crlnSplit := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+        idx := bytes.Index(data, []byte("\r\n"))
+        if idx == -1 {
+            return 0, nil, ircError{-1, "no line separator in data"}
+        }
+        advance = idx+2
+        token = data[0:idx]
+        err = nil
+        //fmt.Printf("idx = %d\n", idx)
+        return advance,token, err
+    }
+    scanner.Split(crlnSplit)
+    log := self.server.log.Printf
+    for self.done == false{
+        self.server.log.Printf("main loop")
+        for scanner.Scan() {
+            msg, err := ircParseMessage(scanner.Text())
+            if err != nil {
+                log("<- cannot parse message: %v", err)
+                self.Kill()
+                break
+            }
+            log("<- %v", msg)
+        }
+        if scanner.Err() != nil {
+            self.server.log.Fatalf("[%s] got error while reading from client: %v", self.id, scanner.Err())
+        }
+        self.Kill()
     }
 }
 func main() {
-    server :=  New()
+    server :=  NewServer()
 	server.run()
 }
