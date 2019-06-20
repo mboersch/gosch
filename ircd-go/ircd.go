@@ -15,14 +15,49 @@ import (
     "net"
     "strconv"
     "time"
+    "sync"
 )
-const ( timeout int  = 60 )
+const ( 
+    irc_ping_timeout int64  = 5
+)
+//Numeric Reply 
+const (
+    RPL_WELCOME = 001
+    RPL_YOURHOST = 002
+    RPL_CREATED = 003
+    RPL_MYINFO = 004
+    //Numeric Replies
+    // NICK
+    ERR_NONICKNAMEGIVEN = 431
+    ERR_ERRONEUSNICKNAME = 432
+    ERR_NICKNAMEINUSE = 433
+    ERR_NICKCOLLISION = 436
+    // USER
+    ERR_NEEDMOREPARAMS = 461
+    ERR_ALREADYREGISTRED = 462
+
+)
+var numericMap  = map[int]string{
+    RPL_WELCOME: "Welcome to the Internet Relay Network %s!%s@%s", // nick, user, host
+    RPL_YOURHOST: "Your host is %s, running version %s", //servername, version
+    RPL_CREATED: "This server was created %s", //date
+    RPL_MYINFO: "%s %s %s %s", //servername version user_modes channel_modes
+    //NICK
+    ERR_NONICKNAMEGIVEN: ":No nickname given",
+    ERR_ERRONEUSNICKNAME: ":Erroneus nickname",
+    ERR_NICKNAMEINUSE: ":Nickname is already in use",
+    ERR_NICKCOLLISION: ":Nickname collision KILL",
+    // USER
+    ERR_NEEDMOREPARAMS: "%s :Not enough parameters",
+    ERR_ALREADYREGISTRED: ":You may not reregister",
+}
 type config struct {
     //config
     address  string
     port     string
     certfile string
     doSelfsigned bool
+    password string
 }
 type ircmessage struct {
     raw string
@@ -40,16 +75,23 @@ type ircd struct {
     log    *log.Logger
     channels []*ircchannel
     clients []*ircclient
+    mutex sync.Mutex
+    created time.Time
 }
 type ircclient struct {
     server *ircd
-    conn *net.Conn
-    connected bool
+    conn net.Conn
+    connwriter *bufio.Writer
+    registered bool
     done bool 
-    nickname string
+    nickname, username, realname string
     ident string
     id string //for logging/handling
-    lastPing time.Time
+    lastActivity int64
+    lastPing int64
+    pingTimer *time.Timer
+    permissions string
+    password string
 }
 type ircError struct {
     code int
@@ -59,6 +101,7 @@ func (err ircError) Error() string {
     return fmt.Sprintf("IRC-ERROR: %d: %s", err.code, err.msg)
 }
 func makeCert(ircd *ircd) error {
+    //TODO this is trivally easy with the crypt/tls pkg, without shellout
     const cmd_selfsign string = "openssl req -x509 -newkey rsa:4096 -keyout -" +
         " -out - -days 3650 -nodes -subj /C=DE/ST=BW/L=BW/O=Faul/OU=Org/CN=%s"
     myaddr := ircd.config.address
@@ -91,6 +134,7 @@ func (self *ircd) parseArgs() error {
     flag.StringVar(&self.config.port, "port", "6697", "specify the port number to listen on")
     flag.StringVar(&self.config.address, "address", "localhost", "specify the internet address to listen on")
     flag.StringVar(&self.config.certfile, "certfile", "", "specify the ssl PEM certificate to use for TLS server")
+    flag.StringVar(&self.config.password, "pass", "", "specify the connection password")
     flag.BoolVar(&self.config.doSelfsigned, "selfsigned", false, "use openssl commands to generate a selfsigned certificate use (development use only)")
 	flag.Parse()
     tmp, err := strconv.Atoi(self.config.port)
@@ -153,10 +197,22 @@ func (self *ircd) run() {
     }
 }
 
+func (self *ircd) registerNickname(nick string, client *ircclient) bool {
+    self.mutex.Lock()
+    defer self.mutex.Unlock()
+    for _, d := range self.clients {
+        if nick == d.nickname {
+            return false
+        }
+    }
+    client.nickname = nick
+    return true
+}
 func NewClient(conn net.Conn, server *ircd) *ircclient {
     rv := new(ircclient)
-    rv.conn = &conn
+    rv.conn = conn
     rv.server = server
+    rv.id = conn.RemoteAddr().String()
     return rv
 }
 func (m *ircmessage) String() string {
@@ -169,6 +225,7 @@ func (m *ircmessage) String() string {
             m.prefix, m.command, param.String(), m.trailing)
 }
 func ircParseMessage( raw string) (msg *ircmessage, err error) {
+    //fmt.Printf("msg = %s\n", raw)
     if len(raw) < 3  {
         return nil, nil
     }
@@ -208,15 +265,133 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
             rv.parameters = append(rv.parameters, t)
         }
     }
-
     return rv, nil
 }
 func (self *ircclient) Kill() {
+    self.log("killed")
     self.done = true
-    self.connected = false
+    self.registered = false
+    if self.pingTimer != nil {
+        self.pingTimer.Stop()
+    }
+    self.conn.Close()
+}
+func (self *ircclient) onRegistered() {
+    self.numericReply(RPL_WELCOME)
+    self.registered = true
+    if len(self.server.config.password) > 0 {
+        if self.password != self.server.config.password {
+            self.log("invalid password")
+            self.Kill()
+            return
+        }
+    }
+    self.log("registered user %s", self.nickname)
+    go self.onTimeout()
+}
+
+func (self *ircclient) onTimeout() {
+    // keep client alive
+    for ! self.done {
+        self.pingTimer = time.NewTimer(time.Second)
+        select {
+        case now := <-self.pingTimer.C:
+            da := now.Unix() - self.lastActivity
+            if da >= irc_ping_timeout  && self.lastPing == 0 {
+                self.Send("PING %s", self.nickname)
+                self.lastPing = time.Now().Unix()
+            }
+            dp := now.Unix() - self.lastPing
+            if dp >= irc_ping_timeout {
+                self.log("Ping timeout t=%d", dp)
+                self.Kill()
+            }
+        }
+    }
+}
+func (self *ircclient) log(msg string, args ...interface{}) {
+    if self.server == nil {
+        return
+    }
+    self.server.log.Printf("[%s] %s", self.id, fmt.Sprintf(msg, args...))
+}
+func (self *ircclient) handleMessage(msg *ircmessage) {
+    //only handle NICK, PASS, USER, CAP for registration
+    switch msg.command {
+    case "NICK":
+        if len(msg.parameters) != 1 {
+            self.numericReply(ERR_ERRONEUSNICKNAME)
+            return
+        }
+        for _,c := range msg.parameters[0] {
+            if ! strconv.IsPrint(c) {
+                self.numericReply(ERR_ERRONEUSNICKNAME)
+                return
+            }
+        }
+        if !self.server.registerNickname(msg.parameters[0], self) {
+            self.numericReply(ERR_NICKNAMEINUSE)
+            return
+        }
+        if len(self.username)  >0 && len(self.realname) > 0 {
+            self.onRegistered()
+        }
+    case "USER":
+        if self.registered {
+            self.numericReply(ERR_ALREADYREGISTRED)
+            return
+        }
+        if len(msg.parameters) != 3  {
+            self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
+            return
+        }
+        self.username = msg.parameters[0]
+        //hostname and servername ignored XXX
+        self.realname = msg.trailing
+        if len(self.nickname) > 0 {
+            self.onRegistered()
+        }
+    case "PASS":
+        if len(msg.parameters) != 1 {
+            self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
+            return
+        }
+        self.password = msg.parameters[0]
+    case "CAP":
+        self.log("ignoring CAP msg")
+    default:
+        self.log("unknown msg <- %v", msg)
+    }
+}
+
+func (self *ircclient) numericReply(num int, args ...interface{}) {
+    msg := ""
+    if tmp, ok := numericMap[num]; ok {
+        msg = tmp
+        if len(args) > 0  {
+            msg = fmt.Sprintf(msg, args...)
+        }
+    }
+    self.Send("%d %s", num, msg)
+}
+func (self *ircclient) Send(tmpl string, args ...interface{}) {
+    //TODO sanitize msg
+    msg := fmt.Sprintf("%s\r\n", fmt.Sprintf(tmpl, args...))
+    n, err := self.connwriter.WriteString(msg)
+    if err != nil {
+        self.log("error writing: %s",msg)
+        self.Kill()
+    }
+    if n != len(msg) {
+        self.log("short write %d != %d", n, len(msg))
+        self.Kill()
+    }
+    self.log("Sent '%s'", msg[0:len(msg)-2])
+    self.lastActivity = time.Now().Unix()
 }
 func (self *ircclient) Run() {
-    scanner := bufio.NewScanner(*self.conn)
+    scanner := bufio.NewScanner(self.conn)
+    self.connwriter = bufio.NewWriter(self.conn)
     crlnSplit := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
         idx := bytes.Index(data, []byte("\r\n"))
         if idx == -1 {
@@ -229,20 +404,19 @@ func (self *ircclient) Run() {
         return advance,token, err
     }
     scanner.Split(crlnSplit)
-    log := self.server.log.Printf
     for self.done == false{
-        self.server.log.Printf("main loop")
+        self.log("main loop")
         for scanner.Scan() {
             msg, err := ircParseMessage(scanner.Text())
             if err != nil {
-                log("<- cannot parse message: %v", err)
+                self.log("<- cannot parse message: %v", err)
                 self.Kill()
                 break
             }
-            log("<- %v", msg)
+            self.handleMessage(msg)
         }
         if scanner.Err() != nil {
-            self.server.log.Fatalf("[%s] got error while reading from client: %v", self.id, scanner.Err())
+            self.log("got error while reading from client: %v", scanner.Err())
         }
         self.Kill()
     }
