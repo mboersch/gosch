@@ -3,6 +3,7 @@ package main
 //
 import (
     "crypto/tls"
+    "crypto/sha256"
     "strings"
     "fmt"
     "flag"
@@ -38,10 +39,10 @@ const (
 
 )
 var numericMap  = map[int]string{
-    RPL_WELCOME: "Welcome to the Internet Relay Network %s!%s@%s", // nick, user, host
-    RPL_YOURHOST: "Your host is %s, running version %s", //servername, version
-    RPL_CREATED: "This server was created %s", //date
-    RPL_MYINFO: "%s %s %s %s", //servername version user_modes channel_modes
+    RPL_WELCOME: ":Welcome to the Internet Relay Network %s", // nick!user@host
+    RPL_YOURHOST: ":Your host is %s, running version %s", //servername, version
+    RPL_CREATED: ":This server was created %s", //date
+    RPL_MYINFO: ":%s %s %s %s", //servername version user_modes channel_modes
     //NICK
     ERR_NONICKNAMEGIVEN: ":No nickname given",
     ERR_ERRONEUSNICKNAME: ":Erroneus nickname",
@@ -92,6 +93,8 @@ type ircclient struct {
     pingTimer *time.Timer
     permissions string
     password string
+    servername string
+    hashedname string
 }
 type ircError struct {
     code int
@@ -169,13 +172,30 @@ func NewServer() *ircd {
     }
     return rv
 }
-func (self *ircd) run() {
+func (self *ircd) addClient(client *ircclient) {
+    self.mutex.Lock()
+    defer self.mutex.Unlock()
+    self.clients = append(self.clients, client)
+}
+func (self *ircd) cleanup() {
+    self.mutex.Lock()
+    defer self.mutex.Unlock()
+
+    for i, cl := range self.clients {
+        if cl.done {
+            self.log.Printf("%s disconnected", cl.id)
+            self.clients = append(self.clients[0:i], self.clients[i+1:]...)
+        }
+    }
+}
+func (self *ircd) Run() {
     crt, err := tls.LoadX509KeyPair(self.config.certfile, self.config.certfile)
     if err != nil {
         self.log.Fatalf("Cannot load cert/key pair: %s", err)
         return
     }
     cfg := &tls.Config{Certificates: []tls.Certificate{crt}}
+
     addr := fmt.Sprintf("%s:%s", self.config.address, self.config.port)
     self.log.Printf("Listening on %s", addr)
     l, err := net.Listen("tcp", addr)
@@ -184,6 +204,7 @@ func (self *ircd) run() {
         return
     }
     defer l.Close()
+
     for {
         cl, err :=  l.Accept()
         if err != nil {
@@ -193,7 +214,7 @@ func (self *ircd) run() {
         tlsconn := tls.Server(cl, cfg)
         client := NewClient(tlsconn, self)
         go client.Run()
-        self.clients = append(self.clients, client)
+        self.addClient(client)
     }
 }
 
@@ -213,6 +234,14 @@ func NewClient(conn net.Conn, server *ircd) *ircclient {
     rv.conn = conn
     rv.server = server
     rv.id = conn.RemoteAddr().String()
+    localname := strings.Split(conn.LocalAddr().String(), ":")
+    rv.servername = localname[0] //default to IP
+    hostnames, err := net.LookupHost(localname[0])
+    if err != nil {
+        rv.servername = hostnames[0]
+    }
+    h := sha256.Sum256([]byte(rv.id))
+    rv.hashedname = fmt.Sprintf("%x", h)
     return rv
 }
 func (m *ircmessage) String() string {
@@ -225,7 +254,7 @@ func (m *ircmessage) String() string {
             m.prefix, m.command, param.String(), m.trailing)
 }
 func ircParseMessage( raw string) (msg *ircmessage, err error) {
-    //fmt.Printf("msg = %s\n", raw)
+    fmt.Printf("msg = %s\n", raw)
     if len(raw) < 3  {
         return nil, nil
     }
@@ -268,16 +297,15 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
     return rv, nil
 }
 func (self *ircclient) Kill() {
-    self.log("killed")
     self.done = true
     self.registered = false
     if self.pingTimer != nil {
         self.pingTimer.Stop()
     }
     self.conn.Close()
+    self.log("killed")
 }
 func (self *ircclient) onRegistered() {
-    self.numericReply(RPL_WELCOME)
     self.registered = true
     if len(self.server.config.password) > 0 {
         if self.password != self.server.config.password {
@@ -287,6 +315,8 @@ func (self *ircclient) onRegistered() {
         }
     }
     self.log("registered user %s", self.nickname)
+    self.ident = fmt.Sprintf("%s!%s@%s", self.nickname, self.username, self.hashedname[0:32])
+    self.numericReply(RPL_WELCOME, self.ident)
     go self.onTimeout()
 }
 
@@ -298,11 +328,11 @@ func (self *ircclient) onTimeout() {
         case now := <-self.pingTimer.C:
             da := now.Unix() - self.lastActivity
             if da >= irc_ping_timeout  && self.lastPing == 0 {
-                self.Send("PING %s", self.nickname)
                 self.lastPing = time.Now().Unix()
+                self.Send("PING %d", self.lastPing)
             }
             dp := now.Unix() - self.lastPing
-            if dp >= irc_ping_timeout {
+            if self.lastPing > 0 && now.Unix() >= self.lastPing + irc_ping_timeout {
                 self.log("Ping timeout t=%d", dp)
                 self.Kill()
             }
@@ -317,6 +347,9 @@ func (self *ircclient) log(msg string, args ...interface{}) {
 }
 func (self *ircclient) handleMessage(msg *ircmessage) {
     //only handle NICK, PASS, USER, CAP for registration
+    if msg == nil {
+        return
+    }
     switch msg.command {
     case "NICK":
         if len(msg.parameters) != 1 {
@@ -365,6 +398,8 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
 }
 
 func (self *ircclient) numericReply(num int, args ...interface{}) {
+    //TODO XXX
+    // should look like :localhost 001 marius :Welcom fooba ?
     msg := ""
     if tmp, ok := numericMap[num]; ok {
         msg = tmp
@@ -372,10 +407,9 @@ func (self *ircclient) numericReply(num int, args ...interface{}) {
             msg = fmt.Sprintf(msg, args...)
         }
     }
-    self.Send("%d %s", num, msg)
+    self.Send(":%s %03d %s %s", self.servername, num, self.nickname, msg)
 }
 func (self *ircclient) Send(tmpl string, args ...interface{}) {
-    //TODO sanitize msg
     msg := fmt.Sprintf("%s\r\n", fmt.Sprintf(tmpl, args...))
     n, err := self.connwriter.WriteString(msg)
     if err != nil {
@@ -386,6 +420,10 @@ func (self *ircclient) Send(tmpl string, args ...interface{}) {
         self.log("short write %d != %d", n, len(msg))
         self.Kill()
     }
+    if err = self.connwriter.Flush(); err != nil {
+        self.log("send flush failed: %s", err)
+        return
+    }
     self.log("Sent '%s'", msg[0:len(msg)-2])
     self.lastActivity = time.Now().Unix()
 }
@@ -394,8 +432,11 @@ func (self *ircclient) Run() {
     self.connwriter = bufio.NewWriter(self.conn)
     crlnSplit := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
         idx := bytes.Index(data, []byte("\r\n"))
+        if len(data) == 0 {
+            return 0, nil, nil
+        }
         if idx == -1 {
-            return 0, nil, ircError{-1, "no line separator in data"}
+            return 0, nil, ircError{-1, fmt.Sprintf("no line separator in data: \"%s\"", string(data))}
         }
         advance = idx+2
         token = data[0:idx]
@@ -418,10 +459,14 @@ func (self *ircclient) Run() {
         if scanner.Err() != nil {
             self.log("got error while reading from client: %v", scanner.Err())
         }
-        self.Kill()
+        //read done
+        if ! self.done {
+            self.Kill()
+        }
+        self.server.cleanup()
     }
 }
 func main() {
     server :=  NewServer()
-	server.run()
+	server.Run()
 }
