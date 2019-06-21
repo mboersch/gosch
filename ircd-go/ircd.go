@@ -20,6 +20,7 @@ import (
 )
 const ( 
     irc_ping_timeout int64  = 5
+    irc_valid_modes string = "iwoOrs" //obsolte: "s"
 )
 //Numeric Reply 
 const (
@@ -36,6 +37,23 @@ const (
     // USER
     ERR_NEEDMOREPARAMS = 461
     ERR_ALREADYREGISTRED = 462
+    //MODE
+    ERR_UMODEUNKNOWNFLAG = 501
+    ERR_USERSDONTMATCH = 502
+    RPL_UMODEIS = 221
+    //JOIN
+    ERR_CHANNELISFULL = 471
+    ERR_INVITEONLYCHAN = 473
+    ERR_BANNEDFROMCHAN = 474
+    ERR_BADCHANNELKEY = 475
+    ERR_BADCHANMASK = 476
+    ERR_NOSUCHCHANNEL = 403
+    ERR_TOOMANYCHANNELS = 405
+    ERR_TOOMANYTARGETS = 407
+    ERR_UNAVAILRESOURCE = 437
+    RPL_NOTOPIC = 331
+    RPL_TOPIC = 332
+
 
 )
 var numericMap  = map[int]string{
@@ -51,6 +69,22 @@ var numericMap  = map[int]string{
     // USER
     ERR_NEEDMOREPARAMS: "%s :Not enough parameters",
     ERR_ALREADYREGISTRED: ":You may not reregister",
+    //MODE
+    ERR_UMODEUNKNOWNFLAG : "Unknown MODE flag",
+    ERR_USERSDONTMATCH : "Cannot change mode for other users",
+    RPL_UMODEIS : "%s",
+    //JOIN
+    ERR_CHANNELISFULL: "%s :Cannot join channel (+l)", //channel
+    ERR_INVITEONLYCHAN: "%s :Cannot join channel (+i)", //channel
+    ERR_BANNEDFROMCHAN: "%s :Cannot join channel (+b)", //channel
+    ERR_BADCHANNELKEY: "%s :Cannot join channel (+k)", //channel
+    ERR_BADCHANMASK: "%s :Bad channel mask", //channel
+    ERR_NOSUCHCHANNEL: "%s :No such channel", //channel
+    ERR_TOOMANYCHANNELS: "%s :You have joined too many channels", //channel
+    ERR_TOOMANYTARGETS: "%s :%d recipients. %s", //target, error_code, abort_message
+    ERR_UNAVAILRESOURCE: "%s :Nick/channel is temporarily unvavailable", //nick/channel
+    RPL_NOTOPIC: "%s :No topic set", //channel
+    RPL_TOPIC: "%s :%s", //channel, topic
 }
 type config struct {
     //config
@@ -59,6 +93,7 @@ type config struct {
     certfile string
     doSelfsigned bool
     password string
+    maxChannels uint
 }
 type ircmessage struct {
     raw string
@@ -68,8 +103,11 @@ type ircmessage struct {
     parameters []string
 }
 type ircchannel struct {
+    name string
     members map[string]*ircclient
     topic string
+    mode string
+    maxUsers uint
 }
 type ircd struct {
     config config
@@ -81,6 +119,7 @@ type ircd struct {
 }
 type ircclient struct {
     server *ircd
+    channels []*ircchannel
     conn net.Conn
     connwriter *bufio.Writer
     registered bool
@@ -95,6 +134,7 @@ type ircclient struct {
     password string
     servername string
     hashedname string
+    mode string
 }
 type ircError struct {
     code int
@@ -102,6 +142,9 @@ type ircError struct {
 }
 func (err ircError) Error() string {
     return fmt.Sprintf("IRC-ERROR: %d: %s", err.code, err.msg)
+}
+func (ircc ircchannel) String() string {
+    return ircc.name
 }
 func makeCert(ircd *ircd) error {
     //TODO this is trivally easy with the crypt/tls pkg, without shellout
@@ -138,6 +181,7 @@ func (self *ircd) parseArgs() error {
     flag.StringVar(&self.config.address, "address", "localhost", "specify the internet address to listen on")
     flag.StringVar(&self.config.certfile, "certfile", "", "specify the ssl PEM certificate to use for TLS server")
     flag.StringVar(&self.config.password, "pass", "", "specify the connection password")
+    flag.UintVar(&self.config.maxChannels, "maxchannels", 16, "maximum number of channels a user can join")
     flag.BoolVar(&self.config.doSelfsigned, "selfsigned", false, "use openssl commands to generate a selfsigned certificate use (development use only)")
 	flag.Parse()
     tmp, err := strconv.Atoi(self.config.port)
@@ -218,6 +262,22 @@ func (self *ircd) Run() {
     }
 }
 
+func (self *ircd) enterChannel(channel string, client *ircclient) bool {
+    self.mutex.Lock()
+    defer self.mutex.Unlock()
+    for _, c := range self.channels {
+        //TODO check modes
+        if c.name == channel {
+            c.members[client.nickname] = client
+            return true
+        }
+    }
+    //does not exist yet
+    nuch := new(ircchannel)
+    nuch.name = channel
+    self.channels = append(self.channels, nuch)
+    return false
+}
 func (self *ircd) registerNickname(nick string, client *ircclient) bool {
     self.mutex.Lock()
     defer self.mutex.Unlock()
@@ -234,6 +294,7 @@ func NewClient(conn net.Conn, server *ircd) *ircclient {
     rv.conn = conn
     rv.server = server
     rv.id = conn.RemoteAddr().String()
+    rv.lastPing = -1
     localname := strings.Split(conn.LocalAddr().String(), ":")
     rv.servername = localname[0] //default to IP
     hostnames, err := net.LookupHost(localname[0])
@@ -326,15 +387,15 @@ func (self *ircclient) onTimeout() {
         self.pingTimer = time.NewTimer(time.Second)
         select {
         case now := <-self.pingTimer.C:
-            da := now.Unix() - self.lastActivity
-            if da >= irc_ping_timeout  && self.lastPing == 0 {
-                self.lastPing = time.Now().Unix()
-                self.Send("PING %d", self.lastPing)
-            }
             dp := now.Unix() - self.lastPing
-            if self.lastPing > 0 && now.Unix() >= self.lastPing + irc_ping_timeout {
+            if self.lastPing > 0  && dp >= irc_ping_timeout {
                 self.log("Ping timeout t=%d", dp)
                 self.Kill()
+            }
+            da := now.Unix() - self.lastActivity
+            if da >= irc_ping_timeout {
+                self.lastPing = time.Now().Unix()
+                self.Send("PING %d", self.lastPing)
             }
         }
     }
@@ -392,6 +453,70 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         self.password = msg.parameters[0]
     case "CAP":
         self.log("ignoring CAP msg")
+    case "PONG":
+        if len(msg.trailing) < 1 {
+            self.log("PONG without trailing received!")
+            return
+        }
+        tmp := fmt.Sprintf("%d", self.lastPing)
+        if tmp != msg.trailing {
+            self.log("PONG mismatch: lastping=%s received=%s", tmp, msg.trailing)
+            return
+        }
+        self.lastPing = -1
+        self.lastActivity = time.Now().Unix()
+    case "PING":
+        self.Send(":%s PONG %s", self.servername, msg.trailing)
+        return
+    case "MODE":
+        if len(msg.parameters) < 2 {
+            self.numericReply(ERR_NEEDMOREPARAMS)
+            return
+        }
+        if msg.parameters[0]  != self.nickname {
+            self.numericReply(ERR_USERSDONTMATCH)
+            return
+        }
+        for _, c := range msg.parameters[1:]{
+            if len(c) != 2 || strings.Index(irc_valid_modes, string(c[1])) == -1 {
+                self.numericReply(ERR_UMODEUNKNOWNFLAG)
+                return
+            }
+            if len(c) == 2 {
+                if c[0] == '+' {
+                    //XXX not implemented modes
+                    if idx := strings.Index(self.mode, string(c[1])); idx == -1 {
+                        self.mode += string(c[1])
+                    }
+                } else if c[0] ==  '-' {
+                    var tmp string
+                    for _, t := range self.mode {
+                        if t != rune(c[1]) {
+                            tmp += string(t)
+                        }
+                    }
+                    self.mode = tmp
+                } else {
+                    self.numericReply(ERR_UMODEUNKNOWNFLAG)
+                    return
+                }
+            }
+        }
+
+        self.numericReply(RPL_UMODEIS, self.mode)
+    case "JOIN":
+        if len(msg.parameters) < 1 {
+            self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
+            return
+        }
+        //TODO might be chan,chan,chan key,key,key or "0"
+        if self.server.enterChannel(msg.parameters[0], self) {
+            self.numericReply(RPL_NOTOPIC, msg.parameters[0])
+            return
+        }
+
+    case "PRIVMSG":
+
     default:
         self.log("unknown msg <- %v", msg)
     }
