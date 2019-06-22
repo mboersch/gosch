@@ -21,6 +21,7 @@ import (
 const ( 
     irc_ping_timeout int64  = 5
     irc_valid_modes string = "iwoOrs" //obsolte: "s"
+    irc_valid_channel_prefix string = "&#"
 )
 //Numeric Reply 
 const (
@@ -53,6 +54,7 @@ const (
     ERR_UNAVAILRESOURCE = 437
     RPL_NOTOPIC = 331
     RPL_TOPIC = 332
+    RPL_NAMREPLY = 353
 
 
 )
@@ -85,6 +87,7 @@ var numericMap  = map[int]string{
     ERR_UNAVAILRESOURCE: "%s :Nick/channel is temporarily unvavailable", //nick/channel
     RPL_NOTOPIC: "%s :No topic set", //channel
     RPL_TOPIC: "%s :%s", //channel, topic
+    RPL_NAMREPLY:  "%s %s :%s",  //symbol(=*@), (symboL)nick ...
 }
 type config struct {
     //config
@@ -142,6 +145,13 @@ type ircError struct {
 }
 func (err ircError) Error() string {
     return fmt.Sprintf("IRC-ERROR: %d: %s", err.code, err.msg)
+}
+func (self *ircchannel) getUsers() []string {
+    rv := make([]string, len(self.members))
+    for n:= range self.members {
+        rv = append(rv, n)
+    }
+    return rv
 }
 func (ircc ircchannel) String() string {
     return ircc.name
@@ -207,6 +217,17 @@ func (self *ircd) parseArgs() error {
     }
     return nil
 }
+func (self *ircd) getChannel(name string) (*ircchannel, error) {
+    for _,c := range self.channels {
+        if c.name == name {
+            return c, nil
+        }
+    }
+    return nil, ircError{-1, "channel not found"}
+}
+func (self *ircd) disseminate(client *ircclient, msg *ircmessage) {
+    //disseminate the client message, e.g. from client to channel etc
+}
 func NewServer() *ircd {
     rv := new(ircd)
     rv.log  = log.New(os.Stdout, "ircd ", log.LstdFlags)
@@ -262,9 +283,16 @@ func (self *ircd) Run() {
     }
 }
 
-func (self *ircd) enterChannel(channel string, client *ircclient) bool {
+func NewChannel(name string) *ircchannel {
+    nuch := new(ircchannel)
+    nuch.name = name
+    nuch.members = make(map[string]*ircclient)
+    return nuch
+}
+func (self *ircd) joinChannel(channel, key string, client *ircclient) bool {
     self.mutex.Lock()
     defer self.mutex.Unlock()
+    //TODO key/password checks
     for _, c := range self.channels {
         //TODO check modes
         if c.name == channel {
@@ -273,9 +301,14 @@ func (self *ircd) enterChannel(channel string, client *ircclient) bool {
         }
     }
     //does not exist yet
-    nuch := new(ircchannel)
-    nuch.name = channel
+    nuch := NewChannel(channel)
+    nuch.members[client.nickname] = client
     self.channels = append(self.channels, nuch)
+    return true
+}
+func (self *ircd) partChannel(channel string, client *ircclient) bool {
+    self.mutex.Lock()
+    defer self.mutex.Unlock()
     return false
 }
 func (self *ircd) registerNickname(nick string, client *ircclient) bool {
@@ -509,19 +542,57 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
-        //TODO might be chan,chan,chan key,key,key or "0"
-        if self.server.enterChannel(msg.parameters[0], self) {
-            self.numericReply(RPL_NOTOPIC, msg.parameters[0])
-            return
+        tgts := strings.Split(msg.parameters[0], ",")
+        var keys []string
+        if len(msg.parameters) == 2 {
+            keys = strings.Split(msg.parameters[1], ",")
+        }
+        for i := range tgts {
+            var k string
+            if i < len(keys) {
+                k = keys[i]
+            }
+            if self.server.joinChannel(tgts[i], k, self){
+                self.onJoin(tgts[i])
+            } else {
+                self.numericReply(ERR_UNAVAILRESOURCE, tgts[i])
+            }
         }
 
+    case "PART":
+        //TODO inverse of join
     case "PRIVMSG":
 
+    case "QUIT":
+        if len(msg.prefix) > 0 {
+            //check if client owns prefix TODO
+        }
+        self.server.disseminate(self, msg)
+        self.Kill()
     default:
         self.log("unknown msg <- %v", msg)
     }
 }
-
+func (self *ircclient) onJoin(channel string) {
+    ch, err := self.server.getChannel(channel)
+    if err != nil {
+        self.log("cannot get channel %s", channel)
+        self.Kill()
+        return
+    }
+    if len(ch.topic) > 0 {
+        self.numericReply(RPL_TOPIC, ch.topic)
+    }
+    self.Send(":%s JOIN %s", self.nickname, channel)
+    // =, *, @ are prefixes for public, private, secret channels
+    var users string
+    for _,u := range ch.getUsers() {
+        if len(u) > 0 {
+            users += fmt.Sprintf("=%s ", u)
+        }
+    }
+    self.numericReply(RPL_NAMREPLY, "=", channel, users)
+}
 func (self *ircclient) numericReply(num int, args ...interface{}) {
     //TODO XXX
     // should look like :localhost 001 marius :Welcom fooba ?
