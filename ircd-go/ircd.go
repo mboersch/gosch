@@ -33,10 +33,20 @@ func isChannelName(in string) bool {
 }
 //Numeric Reply 
 const (
+    // registration / new client
     RPL_WELCOME = 001
     RPL_YOURHOST = 002
     RPL_CREATED = 003
     RPL_MYINFO = 004
+    //RFC 2813 sys we SHALL send LUSERS on connect
+    RPL_LUSERCLIENT = 251
+    RPL_LUSEROP = 252
+    RPL_LUSERUNKOWN = 253
+    RPL_LUSERCHANNELS = 254
+    RPL_LUSERME = 255
+    // WHO
+    RPL_WHOREPLY = 352
+    RPL_ENDOFWHO = 315
     //Numeric Replies
     // NICK
     ERR_NONICKNAMEGIVEN = 431
@@ -65,19 +75,32 @@ const (
     RPL_NAMREPLY = 353
     // PART
     ERR_NOTONCHANNEL = 443
-
+    // PRIVMSG
+    ERR_CANNOTSENDTOCHAN = 404
+    ERR_NORECIPIENT = 411
+    ERR_NOTEXTTOSEND = 412
+    ERR_NOTOPLEVEL = 413
+    ERR_WILDTOPLEVEL=414
+    ERR_NOSUCHNICK =  401
+    ERR_NOSUCHSERVER =  402
 
 )
 var numericMap  = map[int]string{
+    // registration
     RPL_WELCOME: ":Welcome to the Internet Relay Network %s", // nick!user@host
     RPL_YOURHOST: ":Your host is %s, running version %s", //servername, version
     RPL_CREATED: ":This server was created %s", //date
     RPL_MYINFO: ":%s %s %s %s", //servername version user_modes channel_modes
+    RPL_LUSERCLIENT: ": There are %d users and %d services on 1 servers", //num(users), num(services)
+    RPL_LUSEROP: "%d :operator(s) online",//num(operators)
+    RPL_LUSERUNKOWN: "%d :unknown connection(s)", //num(unknown)
+    RPL_LUSERCHANNELS: "%d :channels formed", // num(channels)
+    RPL_LUSERME: ":I have %d clients and 1 servers", //num(clients)
     //NICK
     ERR_NONICKNAMEGIVEN: ":No nickname given",
-    ERR_ERRONEUSNICKNAME: ":Erroneus nickname",
-    ERR_NICKNAMEINUSE: ":Nickname is already in use",
-    ERR_NICKCOLLISION: ":Nickname collision KILL",
+    ERR_ERRONEUSNICKNAME: "%s :Erroneus nickname", //nick
+    ERR_NICKNAMEINUSE: "%s :Nickname is already in use", //nick
+    ERR_NICKCOLLISION: "%s :Nickname collision KILL", //nick
     // USER
     ERR_NEEDMOREPARAMS: "%s :Not enough parameters",
     ERR_ALREADYREGISTRED: ":You may not reregister",
@@ -100,6 +123,17 @@ var numericMap  = map[int]string{
     RPL_NAMREPLY:  "%s %s :%s",  //symbol(=*@), (symboL)nick ...
     //PART
     ERR_NOTONCHANNEL: "%s :You're not on that channel", //channel
+    //PRIVMSG
+    ERR_CANNOTSENDTOCHAN: "%s :Cannot send to channel", //channel
+    ERR_NORECIPIENT: ":No recipient given (%s)", //command
+    ERR_NOTEXTTOSEND : "No text to send",
+    ERR_NOTOPLEVEL: "%s :No toplevel domain specified", //mask
+    ERR_WILDTOPLEVEL: "%s :Wildcard in toplevel domain", //mask
+    ERR_NOSUCHNICK: "%s :No such nick/channel", //nick
+    ERR_NOSUCHSERVER: "%s :No such server", //servername
+    //WHO
+    RPL_ENDOFWHO: "%s :End of WHO list", //name
+    RPL_WHOREPLY: "%s %s %s %s %s :0 %s", //channel user host server nick realname
 }
 type config struct {
     //config
@@ -132,6 +166,7 @@ type ircd struct {
     clients []*ircclient
     mutex sync.Mutex
     created time.Time
+    version string
 }
 type ircclient struct {
     server *ircd
@@ -251,6 +286,7 @@ func (self *ircd) getChannel(name string) (*ircchannel, error) {
 func (self *ircd) deliver(msg *ircmessage) {
     //disseminate the client message, e.g. from client to channel etc
     //channels multiplex: JOIN, MODE, KICK, PART, QUIT, PRIVMSG/NOTICE
+    //TODO NOTICE must not send any error replies
     self.log("enter msg=%v", msg.command)
     switch msg.command {
     case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
@@ -268,21 +304,33 @@ func (self *ircd) deliver(msg *ircmessage) {
                 }
                 self.log("ch=%v, members=%v", ch, ch.members)
                 for _, client := range ch.members {
-                    client.outQueue <- msg.raw
+                    if client == msg.source && (msg.command == "PRIVMSG" || msg.command == "NOTICE")  {
+                        continue
+                    }
+                    client.outQueue <- msg.GetRaw()
                 }
             } else {
                 // :prefix CMD nick/ident
                 //must be client/user
-                cl := self.findClientByNick(tgt)
-                if cl == nil {
-                    self.log("deliver: ignoring msg on non-existing user %s", tgt)
+                //TODO <msgtarget> might be a hostmask ("*.foobar") for OP
+                if msg.command != "PRIVMSG" &&  msg.command != "NOTICE" {
+                    self.log("ERROR: got directed message that is not privmsg/notice!: %v", msg)
                     return
                 }
-                cl.outQueue <- msg.raw
+                if len(msg.trailing) < 1 {
+                    msg.source.numericReply(ERR_NOTEXTTOSEND)
+                    return
+                }
+                cl := self.findClientByNick(tgt)
+                if cl == nil {
+                    msg.source.numericReply(ERR_NOSUCHNICK, tgt)
+                    return
+                }
+                cl.outQueue <- msg.GetRaw()
             }
         } else {
             // :prefix CMD :trailing, only interesting for the current client?
-            msg.source.outQueue <- msg.raw
+            msg.source.outQueue <- msg.GetRaw()
         }
     }
 }
@@ -298,6 +346,8 @@ func (self *ircd) findClientByNick(nick string) *ircclient {
 }
 func NewServer() *ircd {
     rv := new(ircd)
+    rv.version = "Gosch IRC 19.6"
+    rv.created = time.Now()
     rv.logger  = log.New(os.Stdout, "ircd ", log.LstdFlags)
     if err := rv.parseArgs(); err != nil {
         rv.log("ERROR: %s", err)
@@ -421,6 +471,34 @@ func (m *ircmessage) String() string {
     return fmt.Sprintf("Msg<pref=\"%s\",cmd=\"%s\",param=\"%s\",trail=\"%s\">",
             m.prefix, m.command, param.String(), m.trailing)
 }
+
+func (msg *ircmessage) FirstParameter() *string {
+    if len(msg.parameters) > 0 {
+        return &msg.parameters[0]
+    }
+    if len(msg.trailing) > 0 {
+        return &msg.trailing
+    }
+    return nil
+}
+func (m *ircmessage) GetRaw() string {
+    // return updated raw string
+    var raw strings.Builder
+    if len(m.prefix) > 0 {
+        raw.WriteString(fmt.Sprintf(":%s ", m.prefix))
+    }
+    raw.WriteString(m.command)
+    raw.WriteString(" ")
+    for _, b := range m.parameters {
+        raw.WriteString(b)
+        raw.WriteString(" ")
+    }
+    if len(m.trailing) > 0 {
+        raw.WriteString(":")
+        raw.WriteString(m.trailing)
+    }
+    return raw.String()
+}
 func ircParseMessage( raw string) (msg *ircmessage, err error) {
     fmt.Printf("msg = %s\n", raw)
     if len(raw) < 3  {
@@ -485,7 +563,11 @@ func (self *ircclient) onRegistered() {
     }
     self.log("registered user %s", self.nickname)
     self.ident = fmt.Sprintf("%s!%s@%s", self.nickname, self.username, self.hashedname[0:32])
-    self.numericReply(RPL_WELCOME, self.ident)
+    self.numericReply(RPL_WELCOME, self.nickname)
+    self.numericReply(RPL_YOURHOST, self.servername, self.server.version)
+    self.numericReply(RPL_CREATED, self.server.created.Format(time.RFC3339))
+    self.numericReply(RPL_MYINFO, self.servername, self.server.version, "i", "i")
+    self.numericReply(RPL_LUSERME, len(self.server.clients))
     go self.onTimeout()
 }
 
@@ -526,18 +608,19 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     msg.source = self
     switch msg.command {
     case "NICK":
-        if len(msg.parameters) != 1 {
+        tgt := msg.FirstParameter()
+        if tgt == nil {
             self.numericReply(ERR_ERRONEUSNICKNAME)
             return
         }
-        for _,c := range msg.parameters[0] {
+        for _,c := range *tgt {
             if ! strconv.IsPrint(c) {
                 self.numericReply(ERR_ERRONEUSNICKNAME)
                 return
             }
         }
-        if !self.server.registerNickname(msg.parameters[0], self) {
-            self.numericReply(ERR_NICKNAMEINUSE)
+        if !self.server.registerNickname(*tgt, self) {
+            self.numericReply(ERR_NICKNAMEINUSE, *tgt)
             return
         }
         if len(self.username)  >0 && len(self.realname) > 0 {
@@ -564,16 +647,16 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             return
         }
         self.password = msg.parameters[0]
-    case "CAP":
-        self.log("ignoring CAP msg")
     case "PONG":
-        if len(msg.trailing) < 1 {
-            self.log("PONG without trailing received!")
+        param := msg.FirstParameter()
+        if param == nil {
+            self.log("PONG without parameter received!")
             return
         }
+        //check returned parameter
         tmp := fmt.Sprintf("%d", self.lastPing)
-        if tmp != msg.trailing {
-            self.log("PONG mismatch: lastping=%s received=%s", tmp, msg.trailing)
+        if tmp != *param{
+            self.log("PONG mismatch: lastping=%s received=%s", tmp, *param)
             return
         }
         self.lastPing = -1
@@ -664,8 +747,8 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             }
             self.server.deliver(self.makeMessage(":%s PART %s :%s", self.ident, tgt, msg.trailing))
         }
-    case "PRIVMSG":
-
+    case "PRIVMSG", "NOTICE":
+        self.server.deliver(msg)
     case "QUIT":
         if len(msg.prefix) > 0 {
             //check if client owns prefix TODO
@@ -675,6 +758,25 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         self.server.deliver(self.makeMessage(":%s QUIT :%s", self.ident, msg.trailing))
         self.Kill()
+    case "WHO":
+        if len(msg.parameters) < 1 {
+            self.log("who without parameter received")
+            return
+        }
+        mask := &msg.parameters[0]
+        // TODO mask might be a glob, second parameter might be mode/flag
+        if isChannelName(*mask) {
+            ch, err := self.server.getChannel(*mask)
+            if err != nil {
+                self.numericReply(RPL_ENDOFWHO, *mask)
+            } else {
+                for _, cl := range ch.members {
+                    self.numericReply(RPL_WHOREPLY, ch.name, cl.username,
+                        cl.hashedname, self.servername, cl.nickname, cl.realname)
+                }
+            }
+        }
+
     default:
         self.log("unknown msg <- %v", msg)
     }
@@ -723,7 +825,7 @@ func (self *ircclient) numericReply(num int, args ...interface{}) {
     self.send(":%s %03d %s %s", self.servername, num, self.nickname, msg)
 }
 func (self *ircclient) send(tmpl string, args ...interface{}) {
-    self.outQueue <- fmt.Sprintf("%s\r\n", fmt.Sprintf(tmpl, args...))
+    self.outQueue <- fmt.Sprintf(tmpl, args...)
 }
 func (self *ircclient) Start() {
     go self.writeIO()
