@@ -567,6 +567,10 @@ func (self *ircclient) onRegistered() {
     self.numericReply(RPL_YOURHOST, self.servername, self.server.version)
     self.numericReply(RPL_CREATED, self.server.created.Format(time.RFC3339))
     self.numericReply(RPL_MYINFO, self.servername, self.server.version, "i", "i")
+    self.numericReply(RPL_LUSERCLIENT, len(self.server.clients), 0)
+    self.numericReply(RPL_LUSEROP, 0)
+    self.numericReply(RPL_LUSERUNKOWN, 0)
+    self.numericReply(RPL_LUSERCHANNELS,len(self.server.channels))
     self.numericReply(RPL_LUSERME, len(self.server.clients))
     go self.onTimeout()
 }
