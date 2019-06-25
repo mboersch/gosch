@@ -155,6 +155,7 @@ type ircmessage struct {
 type ircchannel struct {
     name string
     members map[string]*ircclient
+    userFlags map[string]string
     topic string
     mode string
     maxUsers uint
@@ -167,6 +168,7 @@ type ircd struct {
     mutex sync.Mutex
     created time.Time
     version string
+    debugLevel int
 }
 type ircclient struct {
     server *ircd
@@ -188,6 +190,7 @@ type ircclient struct {
     servername string
     hashedname string
     mode string
+    isBroken bool
 }
 type ircError struct {
     code int
@@ -196,6 +199,13 @@ type ircError struct {
 func (err ircError) Error() string {
     return fmt.Sprintf("IRC-ERROR: %d: %s", err.code, err.msg)
 }
+
+func (self *ircchannel) getUserFlags(nick string) string {
+    if flag, ok := self.userFlags[nick]; ok {
+        return flag
+    }
+    return ""
+}
 func (self *ircchannel) getNicks() []string {
     rv := make([]string, len(self.members))
     for n:= range self.members {
@@ -203,6 +213,7 @@ func (self *ircchannel) getNicks() []string {
     }
     return rv
 }
+
 func (self *ircchannel) isOperator(nick string) bool {
     return false
 }
@@ -254,6 +265,9 @@ func (self *ircd) parseArgs() error {
     flag.StringVar(&self.config.password, "pass", "", "specify the connection password")
     flag.UintVar(&self.config.maxChannels, "maxchannels", 16, "maximum number of channels a user can join")
     flag.BoolVar(&self.config.doSelfsigned, "selfsigned", false, "use openssl commands to generate a selfsigned certificate use (development use only)")
+    var dbg, trace bool
+    flag.BoolVar(&dbg, "d", false, "set debug level")
+    flag.BoolVar(&trace, "t",  false,"should be -ddd but flags package sucks badly (TODO getopt)")
 	flag.Parse()
     tmp, err := strconv.Atoi(self.config.port)
     if err != nil  || tmp > int(^uint16(0)) {
@@ -276,6 +290,12 @@ func (self *ircd) parseArgs() error {
             return ircError{-4, "cert does not exist"}
         }
     }
+    if dbg {
+        self.debugLevel  = 1
+    }
+    if trace {
+        self.debugLevel = 3
+    }
     return nil
 }
 func (self *ircd) getChannel(name string) (*ircchannel, error) {
@@ -290,7 +310,7 @@ func (self *ircd) deliver(msg *ircmessage) {
     //disseminate the client message, e.g. from client to channel etc
     //channels multiplex: JOIN, MODE, KICK, PART, QUIT, PRIVMSG/NOTICE
     //TODO NOTICE must not send any error replies
-    //self.log("enter msg=%v", msg.command)
+    self.trace("enter msg=%v", msg.command)
     switch msg.command {
     case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
         // XXX locking channels/members ?
@@ -302,14 +322,15 @@ func (self *ircd) deliver(msg *ircmessage) {
             if isChannelName(tgt) {
                 ch, err := self.getChannel(tgt)
                 if err != nil {
-                    self.log("deliver: ignoring msg on non-existing channel %s", tgt)
+                    self.debug("deliver: ignoring msg on non-existing channel %s", tgt)
                     return
                 }
-                //self.log("ch=%v, members=%v", ch, ch.members)
+                self.trace("ch=%v, members=%v", ch, ch.members)
                 for _, client := range ch.members {
                     if client == msg.source && (msg.command == "PRIVMSG" || msg.command == "NOTICE")  {
                         continue
                     }
+                    self.trace("[%s] %s <- %s",client.nickname, tgt, msg.GetRaw())
                     client.outQueue <- msg.GetRaw()
                 }
             } else {
@@ -370,7 +391,11 @@ func (self *ircd) cleanup() {
     for i, cl := range self.clients {
         if cl.done {
             self.log("%s disconnected", cl.id)
-            self.clients = append(self.clients[0:i], self.clients[i+1:]...)
+            if i == len(self.clients) {
+                self.clients = self.clients[0:i]
+            } else {
+                self.clients = append(self.clients[0:i], self.clients[i+1:]...)
+            }
         }
     }
 }
@@ -408,6 +433,7 @@ func NewChannel(name string) *ircchannel {
     nuch := new(ircchannel)
     nuch.name = name
     nuch.members = make(map[string]*ircclient)
+    nuch.userFlags = make(map[string]string)
     return nuch
 }
 func (self *ircd) joinChannel(channel, key string, client *ircclient) bool {
@@ -418,6 +444,7 @@ func (self *ircd) joinChannel(channel, key string, client *ircclient) bool {
         //TODO check modes
         if c.name == channel {
             c.members[client.nickname] = client
+            c.userFlags[client.nickname] = ""
             return true
         }
     }
@@ -435,6 +462,7 @@ func (self *ircd) partChannel(channel string, client *ircclient) bool {
         return false
     }
     delete(ch.members, client.nickname)
+    delete(ch.userFlags, client.nickname)
     return true
 }
 func (self *ircd) registerNickname(nick string, client *ircclient) bool {
@@ -601,6 +629,16 @@ func (self *ircclient) onTimeout() {
         }
     }
 }
+func (self *ircd) trace(msg string, args ...interface{}) {
+    if self.debugLevel > 2 {
+        self.log(fmt.Sprintf("[TRACE] %s", fmt.Sprintf(msg, args...)))
+    }
+}
+func (self *ircd) debug(msg string, args ...interface{}) {
+    if self.debugLevel > 0 {
+        self.log(fmt.Sprintf("[DEBUG] %s", fmt.Sprintf(msg, args...)))
+    }
+}
 func (self *ircd) log(msg string, args ...interface{}) {
     if self.logger == nil {
         fmt.Printf(msg, args...)
@@ -611,6 +649,12 @@ func (self *ircd) log(msg string, args ...interface{}) {
 func (self *ircclient) log(msg string, args ...interface{}) {
     self.server.log("[%s] %s", self.id, fmt.Sprintf(msg, args...))
 }
+func (self *ircclient) debug(msg string, args ...interface{}) {
+    self.server.debug("[%s] %s", self.id, fmt.Sprintf(msg, args...))
+}
+func (self *ircclient) trace(msg string, args ...interface{}) {
+    self.server.trace("[%s] %s", self.id, fmt.Sprintf(msg, args...))
+}
 func (self *ircclient) handleMessage(msg *ircmessage) {
     //only handle NICK, PASS, USER, CAP for registration
     if msg == nil {
@@ -618,6 +662,8 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     }
     msg.source = self
     switch msg.command {
+    case "CAP":
+        self.log("TODO implement capability negotiation")
     case "NICK":
         tgt := msg.FirstParameter()
         if tgt == nil {
@@ -626,7 +672,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         for _,c := range *tgt {
             if ! strconv.IsPrint(c) {
-                self.numericReply(ERR_ERRONEUSNICKNAME)
+                self.numericReply(ERR_ERRONEUSNICKNAME, *tgt)
                 return
             }
         }
@@ -792,11 +838,23 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                         cl.hashedname, self.servername, mode, cl.nickname, cl.realname))
                     */
                     self.numericReply(RPL_WHOREPLY, ch.name, cl.username,
-                        cl.hashedname, self.servername, mode, cl.nickname, cl.realname)
+                        cl.hashedname, self.servername, cl.nickname, mode, cl.realname)
                 }
             }
         }
-
+    case "NAMES":
+        tgt := msg.FirstParameter()
+        if tgt == nil {
+            return //no numeric given in RFC
+        }
+        if len(msg.parameters) == 2 {
+            // channel+ target
+        }
+        for _, t := range strings.Split(*tgt, ",") {
+            if len(t) > 0 {
+                self.namReply(t)
+            }
+        }
     default:
         self.log("unknown msg <- %v", msg)
     }
@@ -812,6 +870,22 @@ func (self *ircclient) makeMessage(tmpl string, args ...interface{}) (*ircmessag
     }
     return msg
 }
+func (self *ircclient) namReply(channel string) {
+    ch, err := self.server.getChannel(channel)
+    if err != nil {
+        return
+    }
+    // =, *, @ are prefixes for public, private, secret channels
+    var users string
+    for _,u := range ch.getNicks() {
+        if len(u) > 0 {
+            user_flags := ch.getUserFlags(u)
+            users += fmt.Sprintf("%s%s ", user_flags, u)
+        }
+    }
+    self.numericReply(RPL_NAMREPLY, "=", channel, users)
+    self.server.deliver(self.makeMessage(":%s JOIN %s", self.ident, channel))
+}
 func (self *ircclient) onJoin(channel string) {
     ch, err := self.server.getChannel(channel)
     if err != nil {
@@ -819,18 +893,9 @@ func (self *ircclient) onJoin(channel string) {
         self.Kill()
         return
     }
-    if len(ch.topic) > 0 {
-        self.numericReply(RPL_TOPIC, ch.topic)
-    }
-    // =, *, @ are prefixes for public, private, secret channels
-    var users string
-    for _,u := range ch.getNicks() {
-        if len(u) > 0 {
-            users += fmt.Sprintf("=%s ", u)
-        }
-    }
-    self.numericReply(RPL_NAMREPLY, "=", channel, users)
-    self.server.deliver(self.makeMessage(":%s JOIN %s", self.ident, channel))
+    self.send(":%s JOIN %s", self.nickname, channel)
+    self.namReply(channel)
+    self.numericReply(RPL_TOPIC, channel, ch.topic)
 }
 func (self *ircclient) numericReply(num int, args ...interface{}) {
     //TODO XXX
@@ -845,6 +910,7 @@ func (self *ircclient) numericReply(num int, args ...interface{}) {
     self.send(":%s %03d %s %s", self.servername, num, self.nickname, msg)
 }
 func (self *ircclient) send(tmpl string, args ...interface{}) {
+    self.trace(tmpl, args...)
     self.outQueue <- fmt.Sprintf(tmpl, args...)
 }
 func (self *ircclient) Start() {
@@ -885,14 +951,23 @@ func (self *ircclient) readIO() {
     scanner := bufio.NewScanner(self.conn)
     self.connwriter = bufio.NewWriter(self.conn)
     crlnSplit := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-        idx := bytes.Index(data, []byte("\r\n"))
+        //tested with pidgin, irssi and konversation -- konversation is broken, sends LN without CR
+        const sep =  byte('\n') 
+        idx := bytes.IndexByte(data, sep)
         if len(data) == 0 {
             return 0, nil, nil
         }
         if idx == -1 {
-            return 0, nil, ircError{-1, fmt.Sprintf("no line separator in data: \"%s\"", string(data))}
+            return len(data), nil, ircError{-1,
+                    fmt.Sprintf("no LN separator in data: %s",
+                            strconv.QuoteToASCII(string(data))) }
         }
-        advance = idx+2
+        advance = idx+1
+        if idx > 0  && data[idx-1] == byte('\r') {
+            idx = idx -1  //skip \r
+        } else {
+            self.isBroken = true
+        }
         token = data[0:idx]
         err = nil
         //fmt.Printf("idx = %d\n", idx)
