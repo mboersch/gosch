@@ -180,7 +180,6 @@ type ircclient struct {
     registered bool
     done bool 
     nickname, username, realname string
-    ident string
     id string //for logging/handling
     lastActivity int64
     lastPing int64
@@ -314,7 +313,7 @@ func (self *ircd) deliver(msg *ircmessage) {
     switch msg.command {
     case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
         // XXX locking channels/members ?
-        msg.prefix = msg.source.ident
+        msg.prefix = msg.source.getIdent()
         if len(msg.parameters)> 0 {
             // :prefix CMD #target
             tgt := msg.parameters[0]
@@ -327,8 +326,10 @@ func (self *ircd) deliver(msg *ircmessage) {
                 }
                 self.trace("ch=%v, members=%v", ch, ch.members)
                 for _, client := range ch.members {
-                    if client == msg.source && (msg.command == "PRIVMSG" || msg.command == "NOTICE")  {
-                        continue
+                    if client == msg.source {
+                        if msg.command == "PRIVMSG" || msg.command == "NOTICE"  {
+                            continue
+                        }
                     }
                     self.trace("[%s] %s <- %s",client.nickname, tgt, msg.GetRaw())
                     client.outQueue <- msg.GetRaw()
@@ -580,8 +581,11 @@ func (self *ircclient) Kill() {
         self.pingTimer.Stop()
     }
     self.conn.Close()
-    self.log("killed")
+    self.log("killed (%s)", self.getIdent())
     self.outQueue <- "" //make sure writeIO wakes up
+}
+func (self *ircclient) getIdent() string {
+    return fmt.Sprintf("%s!%s@%s", self.nickname, self.username, self.hashedname[0:32])
 }
 func (self *ircclient) onRegistered() {
     if self.registered == true {
@@ -596,7 +600,6 @@ func (self *ircclient) onRegistered() {
         }
     }
     self.log("registered user %s", self.nickname)
-    self.ident = fmt.Sprintf("%s!%s@%s", self.nickname, self.username, self.hashedname[0:32])
     self.numericReply(RPL_WELCOME, self.nickname)
     self.numericReply(RPL_YOURHOST, self.servername, self.server.version)
     self.numericReply(RPL_CREATED, self.server.created.Format(time.RFC3339))
@@ -802,18 +805,18 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             if !self.server.partChannel(tgt, self) {
                 self.log("ERROR cannot part channel %s", tgt)
             }
-            self.server.deliver(self.makeMessage(":%s PART %s :%s", self.ident, tgt, msg.trailing))
+            self.server.deliver(self.makeMessage(":%s PART %s :%s", self.getIdent(), tgt, msg.trailing))
         }
     case "PRIVMSG", "NOTICE":
         self.server.deliver(msg)
     case "QUIT":
         if len(msg.prefix) > 0 {
             //check if client owns prefix TODO
-            if msg.prefix != self.ident || msg.prefix  != self.nickname {
+            if msg.prefix != self.getIdent() || msg.prefix  != self.nickname {
                 return
             }
         }
-        self.server.deliver(self.makeMessage(":%s QUIT :%s", self.ident, msg.trailing))
+        self.server.deliver(self.makeMessage(":%s QUIT :%s", self.getIdent(), msg.trailing))
         self.Kill()
     case "WHO":
         if len(msg.parameters) < 1 {
@@ -829,6 +832,9 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                 self.numericReply(RPL_ENDOFWHO, *mask)
             } else {
                 for _, cl := range ch.members {
+                    if cl == self{
+                        continue
+                    }
                     mode := "H"
                     if ch.isOperator(cl.nickname) {
                         mode += "@"
@@ -871,6 +877,7 @@ func (self *ircclient) makeMessage(tmpl string, args ...interface{}) (*ircmessag
     return msg
 }
 func (self *ircclient) namReply(channel string) {
+    self.server.deliver(self.makeMessage(":%s JOIN :%s", self.getIdent(), channel))
     ch, err := self.server.getChannel(channel)
     if err != nil {
         return
@@ -884,7 +891,6 @@ func (self *ircclient) namReply(channel string) {
         }
     }
     self.numericReply(RPL_NAMREPLY, "=", channel, users)
-    self.server.deliver(self.makeMessage(":%s JOIN %s", self.ident, channel))
 }
 func (self *ircclient) onJoin(channel string) {
     ch, err := self.server.getChannel(channel)
@@ -893,7 +899,6 @@ func (self *ircclient) onJoin(channel string) {
         self.Kill()
         return
     }
-    self.send(":%s JOIN %s", self.nickname, channel)
     self.namReply(channel)
     self.numericReply(RPL_TOPIC, channel, ch.topic)
 }
