@@ -72,6 +72,7 @@ const (
     ERR_UNAVAILRESOURCE = 437
     RPL_NOTOPIC = 331
     RPL_TOPIC = 332
+    RPL_TOPICWHOTIME = 333
     RPL_NAMREPLY = 353
     // PART
     ERR_NOTONCHANNEL = 443
@@ -102,7 +103,7 @@ var numericMap  = map[int]string{
     ERR_NICKNAMEINUSE: "%s :Nickname is already in use", //nick
     ERR_NICKCOLLISION: "%s :Nickname collision KILL", //nick
     // USER
-    ERR_NEEDMOREPARAMS: "%s :Not enough parameters",
+    ERR_NEEDMOREPARAMS: "%s :Not enough parameters", //command
     ERR_ALREADYREGISTRED: ":You may not reregister",
     //MODE
     ERR_UMODEUNKNOWNFLAG : "Unknown MODE flag",
@@ -119,7 +120,8 @@ var numericMap  = map[int]string{
     ERR_TOOMANYTARGETS: "%s :%d recipients. %s", //target, error_code, abort_message
     ERR_UNAVAILRESOURCE: "%s :Nick/channel is temporarily unvavailable", //nick/channel
     RPL_NOTOPIC: "%s :No topic set", //channel
-    RPL_TOPIC: "%s :%s", //channel, topic
+    RPL_TOPIC: "%s :%s", //channel topic
+    RPL_TOPICWHOTIME: "%s %s %d", //channel, nick, setat_unix_timestamp
     RPL_NAMREPLY:  "%s %s :%s",  //symbol(=*@), (symboL)nick ...
     //PART
     ERR_NOTONCHANNEL: "%s :You're not on that channel", //channel
@@ -157,8 +159,11 @@ type ircchannel struct {
     members map[string]*ircclient
     userFlags map[string]string
     topic string
+    topicSetBy string
+    topicSetOn time.Time
     mode string
     maxUsers uint
+    created time.Time
 }
 type ircd struct {
     config config
@@ -305,35 +310,49 @@ func (self *ircd) getChannel(name string) (*ircchannel, error) {
     }
     return nil, ircError{-1, "channel not found"}
 }
+func rS( code int) string {
+    //reply code as string
+    return fmt.Sprintf("%03d", code)
+}
+func isNumeric (reply string) bool {
+    if _, err := strconv.Atoi(reply); err == nil {
+        return true
+    }
+    return false
+}
+func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) error {
+    ch, err := self.getChannel(*tgt)
+    if err != nil {
+        self.debug("deliver: ignoring msg on non-existing channel %s", *tgt)
+        return err
+    }
+    self.trace("ch=%v, members=%v", ch, ch.members)
+    for _, client := range ch.members {
+        if client == msg.source {
+            if msg.command == "PRIVMSG" || msg.command == "NOTICE"  {
+                continue
+            }
+        }
+        self.trace("[%s] %s <- %s",client.nickname, *tgt, msg.GetRaw())
+        client.outQueue <- msg.GetRaw()
+    }
+    return nil
+}
 func (self *ircd) deliver(msg *ircmessage) {
     //disseminate the client message, e.g. from client to channel etc
     //channels multiplex: JOIN, MODE, KICK, PART, QUIT, PRIVMSG/NOTICE
     //TODO NOTICE must not send any error replies
-    self.trace("enter msg=%v", msg.command)
+    self.trace("enter msg=%v", msg)
+    msg.prefix = msg.source.getIdent()
     switch msg.command {
     case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
         // XXX locking channels/members ?
-        msg.prefix = msg.source.getIdent()
         if len(msg.parameters)> 0 {
+            tgt := msg.FirstParameter()
             // :prefix CMD #target
-            tgt := msg.parameters[0]
             //self.log("tgt=%v, validChannelName=%v", tgt, isChannelName(tgt))
-            if isChannelName(tgt) {
-                ch, err := self.getChannel(tgt)
-                if err != nil {
-                    self.debug("deliver: ignoring msg on non-existing channel %s", tgt)
-                    return
-                }
-                self.trace("ch=%v, members=%v", ch, ch.members)
-                for _, client := range ch.members {
-                    if client == msg.source {
-                        if msg.command == "PRIVMSG" || msg.command == "NOTICE"  {
-                            continue
-                        }
-                    }
-                    self.trace("[%s] %s <- %s",client.nickname, tgt, msg.GetRaw())
-                    client.outQueue <- msg.GetRaw()
-                }
+            if isChannelName(*tgt) {
+                self.deliverToChannel(tgt, msg)
             } else {
                 // :prefix CMD nick/ident
                 //must be client/user
@@ -346,9 +365,9 @@ func (self *ircd) deliver(msg *ircmessage) {
                     msg.source.numericReply(ERR_NOTEXTTOSEND)
                     return
                 }
-                cl := self.findClientByNick(tgt)
+                cl := self.findClientByNick(*tgt)
                 if cl == nil {
-                    msg.source.numericReply(ERR_NOSUCHNICK, tgt)
+                    msg.source.numericReply(ERR_NOSUCHNICK, *tgt)
                     return
                 }
                 cl.outQueue <- msg.GetRaw()
@@ -356,6 +375,12 @@ func (self *ircd) deliver(msg *ircmessage) {
         } else {
             // :prefix CMD :trailing, only interesting for the current client?
             msg.source.outQueue <- msg.GetRaw()
+        }
+    case rS(RPL_TOPIC), rS(RPL_TOPICWHOTIME):
+        if len(msg.parameters) >= 2 {
+            if isChannelName(msg.parameters[1]) {
+                self.deliverToChannel(&msg.parameters[1], msg)
+            }
         }
     }
 }
@@ -435,6 +460,7 @@ func NewChannel(name string) *ircchannel {
     nuch.name = name
     nuch.members = make(map[string]*ircclient)
     nuch.userFlags = make(map[string]string)
+    nuch.created = time.Now()
     return nuch
 }
 func (self *ircd) joinChannel(channel, key string, client *ircclient) bool {
@@ -802,10 +828,10 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                 self.numericReply(ERR_NOTONCHANNEL, tgt)
                 return
             }
+            self.server.deliver(self.makeMessage(":%s PART %s :%s", self.getIdent(), tgt, msg.trailing))
             if !self.server.partChannel(tgt, self) {
                 self.log("ERROR cannot part channel %s", tgt)
             }
-            self.server.deliver(self.makeMessage(":%s PART %s :%s", self.getIdent(), tgt, msg.trailing))
         }
     case "PRIVMSG", "NOTICE":
         self.server.deliver(msg)
@@ -861,6 +887,39 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                 self.namReply(t)
             }
         }
+    case "TOPIC":
+        tgt := msg.FirstParameter()
+        if tgt == nil || !isChannelName(*tgt) || len(msg.parameters) < 1 {
+            self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
+            return
+        }
+        ch, err := self.server.getChannel(*tgt)
+        if err != nil {
+            self.numericReply(RPL_NOTOPIC, *tgt)
+            return
+        }
+        //TODO cannot distinguish between missing trailing parameter or empty string (delete current topic)
+        if len(msg.trailing) < 1 {
+            self.log("HIER")
+            self.numericReply(RPL_TOPIC, ch.topicSetBy, ch.name, ch.topic)
+            return
+        }
+        if ! ch.isMember(self.nickname) {
+            self.log("not a member")
+            self.numericReply(ERR_NOTONCHANNEL, ch.name)
+            return
+        }
+        ch.topic = msg.trailing
+        ch.topicSetBy = self.nickname
+        ch.topicSetOn = time.Now()
+        tmp := fmt.Sprintf(numericMap[RPL_TOPIC], ch.name, ch.topic)
+        self.server.deliver(self.makeMessage(":%s %s %s %s", self.getIdent(),
+                rS(RPL_TOPIC), self.nickname, tmp))
+        tmp = fmt.Sprintf(numericMap[RPL_TOPICWHOTIME], ch.name,
+            self.nickname, ch.topicSetOn.Unix())
+        self.server.deliver(self.makeMessage(":%s %s %s %s", self.getIdent(),
+            rS(RPL_TOPICWHOTIME), self.nickname, tmp))
+
     default:
         self.log("unknown msg <- %v", msg)
     }
