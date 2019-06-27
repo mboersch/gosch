@@ -53,6 +53,7 @@ const (
     RPL_YOURHOST = 002
     RPL_CREATED = 003
     RPL_MYINFO = 004
+    RPL_TRYAGAIN = 263
     //RFC 2813 sys we SHALL send LUSERS on connect
     RPL_LUSERCLIENT = 251
     RPL_LUSEROP = 252
@@ -117,6 +118,14 @@ const (
     ERR_NOSUCHSERVER =  402
     // USERHOST
     RPL_USERHOST = 302
+    //WHOIS
+    RPL_WHOISUSER = 311
+    RPL_WHOISSERVER = 312
+    RPL_WHOISOPERATOR = 313
+    RPL_WHOISIDLE =317
+    RPL_ENDOFWHOIS = 318
+    RPL_WHOISCHANNELS = 319
+    RPL_AWAY = 301
 
 )
 var numericMap  = map[int]string{
@@ -130,6 +139,7 @@ var numericMap  = map[int]string{
     RPL_LUSERUNKOWN: "%d :unknown connection(s)", //num(unknown)
     RPL_LUSERCHANNELS: "%d :channels formed", // num(channels)
     RPL_LUSERME: ":I have %d clients and 1 servers", //num(clients)
+    RPL_TRYAGAIN: "%s :Please wait a while and try again.", //command
     //NICK
     ERR_NONICKNAMEGIVEN: ":No nickname given",
     ERR_ERRONEUSNICKNAME: "%s :Erroneus nickname", //nick
@@ -187,6 +197,14 @@ var numericMap  = map[int]string{
     ERR_USERSDONTMATCH : "Cannot change mode for other users",
     RPL_UMODEIS : "%s",
     ERR_UNKNOWNMODE: "%s :is unknown mode char to me for %s", // char, channel
+    //WHOIS
+    RPL_WHOISUSER: "%s %s %s * :%s", //nick user host realname
+    RPL_WHOISSERVER: "%s %s :%s", //nick, server, server_info
+    RPL_WHOISOPERATOR: "%s : is an IRC operator", //nick
+    RPL_WHOISIDLE : "%s %d :seconds idle", //nick, numeric_time
+    RPL_ENDOFWHOIS: "%s :End of WHOIS list", //nick
+    RPL_WHOISCHANNELS: "%s : %s", //nick, +@channel (might appear more than once)
+    RPL_AWAY: "%s :%s", //nick, awaymsg
 }
 type config struct {
     //config
@@ -248,6 +266,7 @@ type ircclient struct {
     hashedname string
     mode string
     isBroken bool
+    badBehavior int
 }
 type ircError struct {
     code int
@@ -389,13 +408,12 @@ func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) {
             if msg.command == "PRIVMSG" || msg.command == "NOTICE"  {
                 continue
             }
+            if msg.command =="QUIT" {
+                self.log("skipping client=%v msg=%v", client.id, msg)
+                continue
+            }
         }
-        if msg.command == "JOIN" && client == msg.source {
-            continue
-        }
-        if msg.command == "QUIT" && client == msg.source {
-            continue
-        }
+        self.log("XXX Sending %s %v", client.id, msg)
         client.outQueue <- msg.GetRaw()
     }
     return
@@ -405,11 +423,11 @@ func (self *ircd) deliver(msg *ircmessage) {
     //channels multiplex: JOIN, MODE, KICK, PART, QUIT, PRIVMSG/NOTICE
     //TODO NOTICE must not send any error replies
     self.trace("enter msg=%v", msg)
+    msg.prefix = msg.source.getIdent()
     switch msg.command {
     case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
-        msg.prefix = msg.source.getIdent()
         // XXX locking channels/members ?
-        if len(msg.parameters)> 0 {
+        if msg.NumParameters()> 0 {
             tgt := msg.FirstParameter()
             // :prefix CMD #target
             //self.log("tgt=%v, validChannelName=%v", tgt, isChannelName(tgt))
@@ -442,6 +460,8 @@ func (self *ircd) deliver(msg *ircmessage) {
         if len(msg.parameters) >= 2 {
             if isChannelName(msg.parameters[1]) {
                 self.deliverToChannel(&msg.parameters[1], msg)
+            } else if cl := self.findClientByNick(msg.parameters[1]); cl != nil {
+                cl.outQueue <- msg.GetRaw()
             }
         }
     }
@@ -546,8 +566,15 @@ func NewChannel(name string) *ircchannel {
     return nuch
 }
 func (self *ircchannel) RemoveClient(client *ircclient) {
+    delete(client.channels, self.name)
     delete(self.members, client.nickname)
     delete(self.userFlags, client.nickname)
+}
+func (self *ircchannel) AddClient(client *ircclient) {
+    self.members[client.nickname] = client
+    self.userFlags[client.nickname] = ""
+    client.trace("[%s] %s joined %s", client.id, client.nickname, self.name)
+    client.channels[self.name] = self
 }
 func (self *ircd) joinChannel(channel, key string, client *ircclient){
     //TODO key/password checks
@@ -556,20 +583,13 @@ func (self *ircd) joinChannel(channel, key string, client *ircclient){
     ch := self.getChannel(channel)
     if ch ==  nil {
         //does not exist yet
-        nuch := NewChannel(channel)
-        nuch.members[client.nickname] = client
-        nuch.userFlags[client.nickname] = ""
-        self.channels[nuch.name]= nuch
-        self.trace("[%s] %s created %s", client.id, client.nickname, channel)
-    } else {
-        ch.members[client.nickname] = client
-        ch.userFlags[client.nickname] = ""
-        self.trace("[%s] %s joined %s", client.id, client.nickname, channel)
+        ch = NewChannel(channel)
+        self.channels[ch.name] = ch
     }
+    ch.AddClient(client)
     client.onJoin(channel)
 }
 func (self *ircd) partChannel(channel string, client *ircclient) bool {
-    //TODO should be destroyed when last user leaves
     self.mutex.Lock()
     defer self.mutex.Unlock()
     ch := self.getChannel(channel)
@@ -577,13 +597,18 @@ func (self *ircd) partChannel(channel string, client *ircclient) bool {
         return false
     }
     ch.RemoveClient(client)
+    if len(ch.members) == 0 {
+        self.trace("destroyed channel %v", ch.name)
+        delete(self.channels, ch.name)
+    }
     return true
 }
 func (self *ircd) registerNickname(nick string, client *ircclient) bool {
-    self.mutex.Lock()
-    defer self.mutex.Unlock()
-    for _, d := range self.clients {
-        if nick == d.nickname {
+    cl := self.findClientByNick(nick)
+    if cl != nil {
+        if cl != client {
+            //some other client has the nick
+            self.trace("%v wants %s which is taken by %v", client.id, nick, cl.id)
             return false
         }
     }
@@ -613,7 +638,7 @@ func (m *ircmessage) String() string {
     var param strings.Builder
     for _, b := range m.parameters {
         param.WriteString(b)
-        param.WriteString("; ")
+        param.WriteString(";")
     }
     return fmt.Sprintf("Msg<pref=\"%s\",cmd=\"%s\",param=\"%s\",trail=\"%s\">",
             m.prefix, m.command, param.String(), m.trailing)
@@ -636,26 +661,35 @@ func (m *ircmessage) GetRaw() string {
     }
     raw.WriteString(m.command)
     raw.WriteString(" ")
+    needspc := false
     for _, b := range m.parameters {
+        if needspc {
+            raw.WriteString(" ")
+        }
         raw.WriteString(b)
-        raw.WriteString(" ")
+        needspc = true
     }
     if len(m.trailing) > 0 {
-        raw.WriteString(":")
+        raw.WriteString(" :")
         raw.WriteString(m.trailing)
     }
     return raw.String()
 }
 func ircParseMessage( raw string) (msg *ircmessage, err error) {
-    //fmt.Printf("msg = %s\n", raw)
+    //TODO FFS rewrite this in regexp
+    const space = " "
+    fmt.Printf("msg = %s\n", strconv.QuoteToASCII(raw))
     if len(raw) < 3  {
         return nil, nil
+    }
+    if strings.Index(raw, "\r\n") != -1 {
+        return nil, ircError{-4, "raw message contains CR LN!"}
     }
     var idx int = -1
     rv := new(ircmessage)
     rv.raw = raw
     //colon starts the prefix, up to whitespace
-    raw = strings.TrimLeft(raw, " ")
+    raw = strings.Trim(raw, space)
     if raw[0] == ':' {
         idx = strings.Index(raw, " ")
         if idx == -1  {
@@ -666,14 +700,19 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
         //fmt.Printf("raw1=%s\n", raw)
     }
     //purge whitespace
-    raw = strings.TrimLeft(raw, " ")
+    raw = strings.TrimLeft(raw, space)
     if idx = strings.Index(raw, " "); idx == -1 {
-            return nil, ircError{-1, "command has no end"}
+        if len(raw) > 0 {
+            rv.command = raw
+            return rv, nil
+        } else {
+            return nil, ircError{-2, "no command given"}
+        }
     }
     //command up to whitespace
     rv.command = raw[0:idx]
-    //fmt.Printf("raw2=%s\n", raw)
     raw = raw[idx:]
+    raw = strings.TrimLeft(raw, space)
     //params, muliple whitespace separated, trailer might be ":" separated
     idx = strings.Index(raw, ":")
     if idx != -1 {
@@ -683,6 +722,7 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
     }
     tmp := strings.Split(raw, " ")
     for _, t := range tmp {
+        t = strings.Trim(t, space)
         if len(t) > 0 {
             rv.parameters = append(rv.parameters, t)
         }
@@ -702,6 +742,13 @@ func (self *ircclient) Kill(errormsg string) {
 }
 func (self *ircclient) getIdent() string {
     return fmt.Sprintf("%s!%s@%s", self.nickname, self.username, self.hashedname[0:32])
+}
+func (self *ircclient) behavesBad() {
+    const badLimit = 4
+    self.badBehavior ++
+    if self.badBehavior > badLimit {
+        self.Kill("misbehaving client")
+    }
 }
 func (self *ircclient) onRegistered() {
     if self.registered == true {
@@ -803,6 +850,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         if !self.server.registerNickname(*tgt, self) {
             self.numericReply(ERR_NICKNAMEINUSE, *tgt)
+            self.behavesBad()
             return
         }
         if len(self.username)  >0 && len(self.realname) > 0 {
@@ -910,6 +958,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         self.numericReply(RPL_USERHOST, rv.String())
     case "JOIN":
+        self.trace("msg=%v", msg)
         if msg.NumParameters() < 1 {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
@@ -970,6 +1019,10 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             return
         }
         mask := msg.FirstParameter()
+        if mask == nil {
+            self.numericReply(ERR_NEEDMOREPARAMS, "WHO")
+            return
+        }
         // TODO mask might be a glob, second parameter might be "o" flag
         if isChannelName(*mask) {
             ch := self.server.getChannel(*mask)
@@ -995,12 +1048,48 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             }
         } else {
             // TODO match against nick!user@host
-
+            //cl := self.server.findClientByNick(*mask)
+            //if cl != nil {
+            //}
         }
-        self.numericReply(RPL_ENDOFWHO)
+        self.numericReply(RPL_ENDOFWHO, *mask)
+    case "WHOIS":
+        if msg.NumParameters() > 2 {
+            self.numericReply(RPL_TRYAGAIN,"WHOIS")
+            return
+        }
+        if msg.NumParameters() == 2 {
+            self.numericReply(ERR_NOSUCHSERVER, *msg.FirstParameter())
+            return
+        }
+        mask := msg.FirstParameter()
+        if mask == nil {
+            self.numericReply(ERR_NONICKNAMEGIVEN)
+            return
+        }
+        //TODO -- for now only return a whois user and whoischannels
+        cl := self.server.findClientByNick(*mask)
+        if cl == nil {
+            self.numericReply(ERR_NOSUCHNICK, *mask)
+            return
+        }
+        self.numericReply(RPL_WHOISUSER, cl.nickname,
+            cl.server.servername, cl.hashedname, cl.realname)
+        var tmp strings.Builder
+        for _, ch := range cl.channels {
+            //TODO + and @
+            tmp.WriteString(ch.name)
+            tmp.WriteString(" ")
+        }
+        if len(tmp.String()) > 0 {
+            self.numericReply(RPL_WHOISCHANNELS, cl.nickname, tmp.String())
+        }
+        self.numericReply(RPL_ENDOFWHOIS, cl.nickname)
+
     case "NAMES":
         tgt := msg.FirstParameter()
         if tgt == nil {
+            self.numericReply(ERR_NEEDMOREPARAMS,"NAMES")
             return //no numeric given in RFC
         }
         if len(msg.parameters) == 2 {
@@ -1013,7 +1102,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
     case "TOPIC":
         tgt := msg.FirstParameter()
-        if tgt == nil || !isChannelName(*tgt) || len(msg.parameters) < 1 {
+        if tgt == nil || !isChannelName(*tgt) || msg.NumParameters() < 1 {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
@@ -1022,7 +1111,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(RPL_NOTOPIC, *tgt)
             return
         }
-        //TODO cannot distinguish between missing trailing parameter or empty string (delete current topic)
+        // if trailing is set but empty it means we should clear TODO
         if len(msg.trailing) < 1 {
             self.log("HIER")
             self.numericReply(RPL_TOPIC, ch.topicSetBy, ch.name, ch.topic)
@@ -1052,13 +1141,11 @@ func (self *ircclient) isAway() bool {
     return false //TODO implement me
 }
 func (self *ircclient) makeMessage(tmpl string, args ...interface{}) (*ircmessage) {
-    msg, err := ircParseMessage(fmt.Sprintf(tmpl, args...))
-    if err != nil {
+    msg, _ := ircParseMessage(fmt.Sprintf(tmpl, args...))
+    if msg == nil {
         return nil
     }
-    if msg != nil {
-        msg.source = self
-    }
+    msg.source = self
     return msg
 }
 func (self *ircclient) namReply(channel string) {
@@ -1068,10 +1155,15 @@ func (self *ircclient) namReply(channel string) {
     }
     // =, *, @ are prefixes for public, private, secret channels
     var users string
+    needspc := false
     for _,u := range ch.getNicks() {
         if len(u) > 0 {
+            if needspc{
+                users +=" "
+            }
             user_flags := ch.getUserFlags(u)
-            users += fmt.Sprintf("%s%s ", user_flags, u)
+            users += fmt.Sprintf("%s%s", user_flags, u)
+            needspc = true
         }
     }
     self.numericReply(RPL_NAMREPLY, "=", channel, users)
@@ -1085,11 +1177,14 @@ func (self *ircclient) onJoin(channel string) {
         self.Kill("join on non-existing channel")
         return
     }
-    self.channels[ch.name] = ch
-    self.send(":%s JOIN %s", self.getIdent(), channel)
-    self.server.deliver(self.makeMessage(":%s JOIN %s", self.getIdent(), channel))
+    //self.send(":%s JOIN %s", self.getIdent(), channel)
+    self.server.deliver(self.makeMessage(":%s JOIN %s ", self.getIdent(), channel))
     self.namReply(channel)
-    self.numericReply(RPL_TOPIC, channel, ch.topic)
+    if len(ch.topic) < 1 {
+        self.numericReply(RPL_NOTOPIC, channel)
+    } else {
+        self.numericReply(RPL_TOPIC, channel, ch.topic)
+    }
 }
 func (self *ircclient) numericReply(num int, args ...interface{}) {
     //TODO XXX
@@ -1100,6 +1195,8 @@ func (self *ircclient) numericReply(num int, args ...interface{}) {
         if len(args) > 0  {
             msg = fmt.Sprintf(msg, args...)
         }
+    } else {
+        self.log("numeric not in map: %d", num)
     }
     self.send(":%s %03d %s %s", self.server.servername, num, self.nickname, msg)
 }
@@ -1135,7 +1232,7 @@ func (self *ircclient) writeIO() {
                 self.log("send flush failed: %s", err)
                 return
             }
-            //self.log("Sent '%s'", msg[0:len(msg)-2])
+            self.log("Sent %s", strconv.QuoteToASCII(msg))
             self.lastActivity = time.Now().Unix()
         }
     }
@@ -1146,7 +1243,7 @@ func (self *ircclient) readIO() {
     self.connwriter = bufio.NewWriter(self.conn)
     crlnSplit := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
         //tested with pidgin, irssi and konversation -- konversation is broken, sends LN without CR
-        const sep =  byte('\n') 
+        const sep =  byte('\n')
         idx := bytes.IndexByte(data, sep)
         if len(data) == 0 {
             return 0, nil, nil
