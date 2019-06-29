@@ -2,15 +2,12 @@
 package server
 import (
     . "gosch/irc"
+    "gosch/util"
     "crypto/tls"
-    "strings"
     "fmt"
     "flag"
     "log"
     "os"
-    "os/exec"
-    "io/ioutil"
-    "bytes"
     "net"
     "strconv"
     "time"
@@ -51,32 +48,6 @@ type ircd struct {
     version string
     debugLevel int
     servername string
-}
-
-func makeCert(ircd *ircd) error {
-    //TODO this is trivally easy with the crypt/tls pkg, without shellout
-    const cmd_selfsign string = "openssl req -x509 -newkey rsa:4096 -keyout -" +
-        " -out - -days 3650 -nodes -subj /C=DE/ST=BW/L=BW/O=Faul/OU=Org/CN=%s"
-    myaddr := ircd.config.address
-    filename := ircd.config.certfile
-    if strings.Index(myaddr, " ")  != -1 {
-        return ircError{-1, "invalid user input as certificate hostname"}
-    }
-    //expand template and pipe output into file
-    tmp := fmt.Sprintf(cmd_selfsign, myaddr)
-    args := strings.Fields(tmp)
-    var out, cerr bytes.Buffer
-    ircd.log("calling %v\n", args)
-    cmd := exec.Command(args[0], args[1:]...)
-    cmd.Stdout = &out
-    cmd.Stderr = &cerr
-    err := cmd.Run()
-    if err != nil {
-        fmt.Printf("ERROR openssl: %s\n", cerr.String())
-        return err
-    }
-    ircd.log("openssl returned %d bytes\n", len(out.String()))
-    return ioutil.WriteFile(filename, out.Bytes(), 0600)
 }
 
 func (self *ircd) trace(msg string, args ...interface{}) {
@@ -124,7 +95,8 @@ func (self *ircd) parseArgs() error {
     _ , err = os.Stat(self.config.certfile)
     if os.IsNotExist(err) {
         if self.config.doSelfsigned {
-            if err := makeCert(self); err != nil {
+            if err := util.MakeSelfSignedPemFile(self.config.address,
+                        self.config.certfile); err != nil {
                 self.log("cannot make self signed cert: %s\n", err)
                 return ircError{-3, "create self signed cert"}
             }
@@ -283,20 +255,28 @@ func (self *ircd) Run() {
     cfg := &tls.Config{Certificates: []tls.Certificate{crt}}
 
 
-    addr := fmt.Sprintf("%s:%s", self.config.address, self.config.port)
-    self.log("Listening on %s", addr)
 
-
+    host := self.config.address
+    myhost, err := os.Hostname()
+    if err != nil  {
+        self.log("cannot get hostname: %s", err)
+        myhost = self.config.address //back to default
+    }
+    self.log("hostname: %s", myhost)
+    if  host == myhost {
+        host = "" //listen to all
+    }
+    addr := fmt.Sprintf("%s:%s", host, self.config.port)
     l, err := net.Listen("tcp", addr)
     if err != nil {
         self.log("Cannot create listening socket on  %s", addr)
         return
     }
     defer l.Close()
+    self.log("Listening on %s", l.Addr())
 
-    localname := strings.Split(l.Addr().String(), ":")
-    self.servername = localname[0] //default to IP
-    hostnames, err := net.LookupHost(localname[0])
+    self.servername = myhost
+    hostnames, err := net.LookupHost(myhost)
     if err != nil {
         self.servername = hostnames[0]
     }
