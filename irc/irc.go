@@ -1,5 +1,5 @@
 //Copyright (C) 2019  Marius Boerschig <code (at) boerschig (dot) net>
-package ircd
+package irc
 // the main IRC definitions
 // see doc/*.txt 
 import (
