@@ -1,4 +1,4 @@
-.PHONY: ircd
+.PHONY: gosch
 gosch:
 	go build 
 test:
