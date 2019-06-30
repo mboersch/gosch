@@ -73,14 +73,15 @@ func (self *ircclient) onRegistered() {
     if self.registered == true {
         return
     }
-    self.registered = true
     if len(self.server.config.password) > 0 {
         if self.password != self.server.config.password {
-            self.log("invalid password")
+            self.numericReply(ERR_ALREADYREGISTRED)
+            self.log("invalid password: %v", self.password)
             self.Kill("invalid password")
             return
         }
     }
+    self.registered = true
     self.log("registered user %s", self.getIdent())
     self.numericReply(RPL_WELCOME, self.nickname)
     self.numericReply(RPL_YOURHOST, self.server.servername, self.server.version)
@@ -102,12 +103,12 @@ func (self *ircclient) onTimeout() {
         select {
         case now := <-self.pingTimer.C:
             dp := now.Unix() - self.lastPing
-            if self.lastPing > 0  && dp >= IRC_ping_timeout {
+            if self.lastPing > 0  && dp >= int64(self.server.config.timeout) {
                 self.log("Ping timeout t=%d", dp)
                 self.Kill("Ping timeout")
             }
             da := now.Unix() - self.lastActivity
-            if da >= IRC_ping_timeout {
+            if da >= int64(self.server.config.timeout) {
                 self.lastPing = time.Now().Unix()
                 self.send("PING %d", self.lastPing)
             }
@@ -123,6 +124,11 @@ func (self *ircclient) debug(msg string, args ...interface{}) {
 func (self *ircclient) trace(msg string, args ...interface{}) {
     self.server.trace("[%s] %s", self.id, fmt.Sprintf(msg, args...))
 }
+func (self *ircclient) trace2(msg string, args ...interface{}) {
+    if self.server.debugLevel > 2 {
+        self.server.trace("[%s] %s", self.id, fmt.Sprintf(msg, args...))
+    }
+}
 func (self *ircclient) handleMessage(msg *ircmessage) {
     //only handle NICK, PASS, USER, CAP for registration
     if msg == nil {
@@ -134,6 +140,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         return
     }()
+    self.trace2("msg=%v",msg)
     msg.source = self
     switch msg.command {
     case "CAP":
@@ -163,22 +170,23 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(ERR_ALREADYREGISTRED)
             return
         }
-        if len(msg.parameters) != 3  {
+        if msg.NumParameters() != 4  { //user mdoe unused realname
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
-        self.username = msg.parameters[0]
+        self.username = *msg.FirstParameter()
         //hostname and servername ignored XXX
         self.realname = msg.trailing
         if len(self.nickname) > 0 {
             self.onRegistered()
         }
     case "PASS":
-        if len(msg.parameters) != 1 {
+        if msg.NumParameters() !=  1 {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
-        self.password = msg.parameters[0]
+        self.password = *msg.FirstParameter()
+        self.trace("PASS=%v", *msg.FirstParameter())
     case "PONG":
         param := msg.FirstParameter()
         if param == nil {
@@ -278,7 +286,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
 
     case "PART":
-        if len(msg.parameters) < 1 {
+        if msg.NumParameters() < 1 {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
@@ -315,7 +323,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         self.server.onDisconnect(self)
         self.Kill(fmt.Sprintf("quit %s", strconv.QuoteToASCII(msg.trailing)))
     case "WHO":
-        if len(msg.parameters) < 1 {
+        if msg.NumParameters() < 1 {
             self.log("who without parameter received")
             return
         }
@@ -393,7 +401,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(ERR_NEEDMOREPARAMS,"NAMES")
             return //no numeric given in RFC
         }
-        if len(msg.parameters) == 2 {
+        if msg.NumParameters() == 2 {
             // channel+ target
         }
         for _, t := range strings.Split(*tgt, ",") {
@@ -404,23 +412,23 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     case "TOPIC":
         tgt := msg.FirstParameter()
         if tgt == nil || !IsChannelName(*tgt) || msg.NumParameters() < 1 {
+            self.trace("TOPIC without enough parameters")
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
         ch := self.server.getChannel(*tgt)
         if ch == nil {
+            self.trace("TOPIC cannot find channel %v", *tgt)
             self.numericReply(RPL_NOTOPIC, *tgt)
             return
         }
-        // if trailing is set but empty it means we should clear TODO
-        if len(msg.trailing) < 1 {
-            self.log("HIER")
-            self.numericReply(RPL_TOPIC, ch.topicSetBy, ch.name, ch.topic)
+        if ! ch.isMember(self.nickname) {
+            self.trace("TOPIC not a member")
+            self.numericReply(ERR_NOTONCHANNEL, ch.name)
             return
         }
-        if ! ch.isMember(self.nickname) {
-            self.log("not a member")
-            self.numericReply(ERR_NOTONCHANNEL, ch.name)
+        if ! msg.hasTrailing {
+            self.numericReply(RPL_TOPIC, ch.topicSetBy, ch.name, ch.topic)
             return
         }
         ch.topic = msg.trailing
@@ -428,11 +436,11 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         ch.topicSetOn = time.Now()
         tmp := fmt.Sprintf(NumericMap[RPL_TOPIC], ch.name, ch.topic)
         self.server.deliver(self.makeMessage(":%s %s %s %s", self.getIdent(),
-                string(RPL_TOPIC), self.nickname, tmp))
+                RPL_TOPIC.String(), self.nickname, tmp))
         tmp = fmt.Sprintf(NumericMap[RPL_TOPICWHOTIME], ch.name,
             self.nickname, ch.topicSetOn.Unix())
         self.server.deliver(self.makeMessage(":%s %s %s %s", self.getIdent(),
-            string(RPL_TOPICWHOTIME), self.nickname, tmp))
+            RPL_TOPICWHOTIME.String(), self.nickname, tmp))
 
     default:
         self.log("unknown msg <- %v", msg)
@@ -499,7 +507,7 @@ func (self *ircclient) numericReply(num NumericReply, args ...interface{}) {
     } else {
         self.log("numeric not in map: %d", num)
     }
-    self.send(":%s %03d %s %s", self.server.servername, num, self.nickname, msg)
+    self.send(":%s %s %s %s", self.server.servername, num.String(), self.nickname, msg)
 }
 func (self *ircclient) send(tmpl string, args ...interface{}) {
     self.trace(tmpl, args...)

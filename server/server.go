@@ -21,6 +21,7 @@ type config struct {
     doSelfsigned bool
     password string
     maxChannels uint
+    timeout uint
 }
 type ircError struct {
     code int
@@ -72,17 +73,31 @@ func (self *ircd) usage(msg string ) {
     flag.PrintDefaults()
     os.Stderr.WriteString(fmt.Sprintf("ERROR: %s\n", msg))
 }
-func (self *ircd) parseArgs() error {
-    flag.StringVar(&self.config.port, "port", "6697", "specify the port number to listen on")
-    flag.StringVar(&self.config.address, "address", "localhost", "specify the internet address to listen on")
-    flag.StringVar(&self.config.certfile, "certfile", "", "specify the ssl PEM certificate to use for TLS server")
-    flag.StringVar(&self.config.password, "pass", "", "specify the connection password")
-    flag.UintVar(&self.config.maxChannels, "maxchannels", 16, "maximum number of channels a user can join")
-    flag.BoolVar(&self.config.doSelfsigned, "selfsigned", false, "use openssl commands to generate a selfsigned certificate use (development use only)")
-    var dbg, trace bool
-    flag.BoolVar(&dbg, "d", false, "set debug level")
-    flag.BoolVar(&trace, "t",  false,"should be -ddd but flags package sucks badly (TODO getopt)")
-	flag.Parse()
+func (self *ircd) parseArgs(args []string) error {
+    for k, arg := range args {
+        if len(arg)>= 2 && arg[0] == '-' && arg[1] == 'v' {
+            self.debugLevel ++
+            for i := 2; i < len(arg); i++ {
+                self.debugLevel ++
+            }
+            //remove -d+ from args
+            args = append(args[:k], args[k+1:]...)
+            break
+        }
+    }
+    cmd := flag.NewFlagSet("gosch", flag.ContinueOnError)
+    cmd.StringVar(&self.config.port, "port", "6697", "specify the port number to listen on")
+    cmd.StringVar(&self.config.address, "address", "localhost", "specify the internet address to listen on")
+    cmd.StringVar(&self.config.certfile, "certfile", "", "specify the ssl PEM certificate to use for TLS server")
+    cmd.StringVar(&self.config.password, "password", "", "specify the connection password")
+    cmd.UintVar(&self.config.maxChannels, "maxchannels", 8, "maximum number of channels a user can join")
+    cmd.UintVar(&self.config.timeout, "clienttimeout", 60, "idle client timeout in seconds")
+    cmd.BoolVar(&self.config.doSelfsigned, "selfsigned", false, "create a selfsigned certificate use (development use only)")
+    cmd.Bool("v", false, "set verbosity level (use -vv to increase debug level)")
+    err := cmd.Parse(args)
+    if err != nil {
+        return err
+    }
     tmp, err := strconv.Atoi(self.config.port)
     if err != nil  || tmp > int(^uint16(0)) {
         self.usage("the specified port is invalid")
@@ -104,12 +119,6 @@ func (self *ircd) parseArgs() error {
             self.usage("the certfificate file does not exist")
             return ircError{-4, "cert does not exist"}
         }
-    }
-    if dbg {
-        self.debugLevel  = 1
-    }
-    if trace {
-        self.debugLevel = 3
     }
     return nil
 }
@@ -204,18 +213,17 @@ func (self *ircd) findClientByNick(nick string) *ircclient {
     }
     return nil
 }
-func NewServer() *ircd {
+func NewServer(args []string) (*ircd, error) {
     rv := new(ircd)
     rv.version = "Gosch IRC 19.6"
     rv.created = time.Now()
     rv.logger  = log.New(os.Stdout, "ircd ", log.LstdFlags)
-    if err := rv.parseArgs(); err != nil {
-        rv.log("ERROR: %s", err)
-        return nil
+    if err := rv.parseArgs(args); err != nil {
+        return nil, err
     }
     rv.clients = make(map[string]*ircclient)
     rv.channels = make(map[string]*ircchannel)
-    return rv
+    return rv, nil
 }
 func (self *ircd) addClient(client *ircclient) {
     self.mutex.Lock()
