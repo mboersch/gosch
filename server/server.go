@@ -96,8 +96,7 @@ func (self *ircd) parseArgs() error {
     if os.IsNotExist(err) {
         if self.config.doSelfsigned {
             self.log("creating self signed tls certificate")
-            if err := util.MakeSelfSignedPemFile(self.config.address,
-                        self.config.certfile); err != nil {
+            if err := util.MakeSelfSignedPemFile(self.config.certfile); err != nil {
                 self.log("cannot make self signed cert: %s\n", err)
                 return ircError{-3, "create self signed cert"}
             }
@@ -139,11 +138,11 @@ func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) {
                 continue
             }
             if msg.command =="QUIT" {
-                self.log("skipping client=%v msg=%v", client.id, msg)
+                self.trace("skipping client=%v msg=%v", client.id, msg)
                 continue
             }
         }
-        self.log("XXX Sending %s %v", client.id, msg)
+        self.trace("Sending %s %v", client.id, msg)
         client.outQueue <- msg.GetRaw()
     }
     return
@@ -152,7 +151,6 @@ func (self *ircd) deliver(msg *ircmessage) {
     //disseminate the client message, e.g. from client to channel etc
     //channels multiplex: JOIN, MODE, KICK, PART, QUIT, PRIVMSG/NOTICE
     //TODO NOTICE must not send any error replies
-    self.trace("enter msg=%v", msg)
     msg.prefix = msg.source.getIdent()
     switch msg.command {
     case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
@@ -186,7 +184,7 @@ func (self *ircd) deliver(msg *ircmessage) {
             // :prefix CMD :trailing, only interesting for the current client?
             msg.source.outQueue <- msg.GetRaw()
         }
-    case string(RPL_TOPIC), string(RPL_TOPICWHOTIME):
+    case RPL_TOPIC.String(), RPL_TOPICWHOTIME.String():
         if len(msg.parameters) >= 2 {
             if IsChannelName(msg.parameters[1]) {
                 self.deliverToChannel(&msg.parameters[1], msg)

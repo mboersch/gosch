@@ -2,5 +2,5 @@
 package server
 import "testing"
 
-func MessageTest(t *testing.T) {
+func TestMessage(t *testing.T) {
 }

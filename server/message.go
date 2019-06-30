@@ -2,14 +2,15 @@
 package server
 import (
     "fmt"
-    "strconv"
     "strings"
+    "strconv"
 )
 type ircmessage struct {
     raw string
     prefix string
     command string
     trailing string //should be just another parameter
+    hasTrailing bool
     parameters []string
     source *ircclient
 }
@@ -23,13 +24,27 @@ func (m *ircmessage) NumParameters() int {
     return r
 }
 func (m *ircmessage) String() string {
-    var param strings.Builder
+    var rv strings.Builder
+    rv.WriteString("Msg<prefix=")
+    rv.WriteString(m.prefix)
+    rv.WriteString(",cmd=")
+    rv.WriteString(m.command)
+    rv.WriteString(",params<")
     for _, b := range m.parameters {
-        param.WriteString(b)
-        param.WriteString(";")
+        rv.WriteString(b)
+        rv.WriteString(";")
     }
-    return fmt.Sprintf("Msg<pref=\"%s\",cmd=\"%s\",param=\"%s\",trail=\"%s\">",
-            m.prefix, m.command, param.String(), m.trailing)
+    rv.WriteString(">")
+    if m.hasTrailing {
+        rv.WriteString(",trail=")
+        if m.command == "NOTICE" || m.command == "PRIVMSG" {
+            rv.WriteString(fmt.Sprintf("%d bytes", len(m.trailing)))
+        } else {
+            rv.WriteString(strconv.QuoteToASCII(m.trailing))
+        }
+    }
+    rv.WriteString(">")
+    return rv.String()
 }
 
 func (msg *ircmessage) FirstParameter() *string {
@@ -66,7 +81,6 @@ func (m *ircmessage) GetRaw() string {
 func ircParseMessage( raw string) (msg *ircmessage, err error) {
     //TODO FFS rewrite this in regexp
     const space = " "
-    fmt.Printf("msg = %s\n", strconv.QuoteToASCII(raw))
     if len(raw) < 3  {
         return nil, nil
     }
@@ -104,6 +118,7 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
     //params, muliple whitespace separated, trailer might be ":" separated
     idx = strings.Index(raw, ":")
     if idx != -1 {
+        rv.hasTrailing =true
         rv.trailing = raw[idx+1:]
         raw = raw[0:idx]
         //fmt.Printf("raw3=%s\n", raw)

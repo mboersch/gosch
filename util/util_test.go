@@ -4,7 +4,7 @@ package util
 import "testing"
 
 func TestCreateSelfSigned(t *testing.T) {
-    pem, err := MakeSelfSignedCert("localhost", 4096)
+    pem, err := MakeSelfSignedCert(4096)
     if err != nil {
         t.Fatalf("MakeSelfSigned returned error: %v", err)
     }

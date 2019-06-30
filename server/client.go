@@ -81,7 +81,7 @@ func (self *ircclient) onRegistered() {
             return
         }
     }
-    self.log("registered user %s", self.nickname)
+    self.log("registered user %s", self.getIdent())
     self.numericReply(RPL_WELCOME, self.nickname)
     self.numericReply(RPL_YOURHOST, self.server.servername, self.server.version)
     self.numericReply(RPL_CREATED, self.server.created.Format(time.RFC3339))
@@ -260,7 +260,6 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         self.numericReply(RPL_USERHOST, rv.String())
     case "JOIN":
-        self.trace("msg=%v", msg)
         if msg.NumParameters() < 1 {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
@@ -534,7 +533,7 @@ func (self *ircclient) writeIO() {
                 self.log("send flush failed: %s", err)
                 return
             }
-            self.log("Sent %s", strconv.QuoteToASCII(msg))
+            self.trace("Sent %s", strconv.QuoteToASCII(msg))
             self.lastActivity = time.Now().Unix()
         }
     }
