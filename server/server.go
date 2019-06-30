@@ -95,6 +95,7 @@ func (self *ircd) parseArgs() error {
     _ , err = os.Stat(self.config.certfile)
     if os.IsNotExist(err) {
         if self.config.doSelfsigned {
+            self.log("creating self signed tls certificate")
             if err := util.MakeSelfSignedPemFile(self.config.address,
                         self.config.certfile); err != nil {
                 self.log("cannot make self signed cert: %s\n", err)
