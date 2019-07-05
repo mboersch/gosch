@@ -6,7 +6,6 @@ import (
     "crypto/tls"
     "fmt"
     "flag"
-    "log"
     "os"
     "net"
     "strconv"
@@ -22,7 +21,14 @@ type config struct {
     password string
     maxChannels uint
     timeout uint
+    logfile string
+    sysuser, sysgroup string
+    pidfile string
+    isDaemon bool
 }
+const (
+    SERVER_VERSION string = "0.0.1"
+)
 type ircError struct {
     code int
     msg string
@@ -36,12 +42,11 @@ func isNumeric (reply string) bool {
     }
     return false
 }
-
 /////////////////////////////////////////////
 // ircd
 type ircd struct {
     config config
-    logger    *log.Logger
+    logger    util.Logger
     channels map[string]*ircchannel
     clients map[string]*ircclient
     mutex sync.Mutex
@@ -52,21 +57,17 @@ type ircd struct {
 }
 
 func (self *ircd) trace(msg string, args ...interface{}) {
-    if self.debugLevel > 2 {
-        self.log(fmt.Sprintf("[TRACE] %s", fmt.Sprintf(msg, args...)))
-    }
+    self.logger.Trace(msg, args...)
 }
 func (self *ircd) debug(msg string, args ...interface{}) {
-    if self.debugLevel > 0 {
-        self.log(fmt.Sprintf("[DEBUG] %s", fmt.Sprintf(msg, args...)))
-    }
+    self.logger.Debug(msg, args...)
 }
 func (self *ircd) log(msg string, args ...interface{}) {
     if self.logger == nil {
         fmt.Printf(msg, args...)
         return
     }
-    self.logger.Printf("%s", fmt.Sprintf(msg, args...))
+    self.logger.Info(msg, args...)
 }
 
 func (self *ircd) usage(msg string ) {
@@ -75,28 +76,47 @@ func (self *ircd) usage(msg string ) {
 }
 func (self *ircd) parseArgs(args []string) error {
     for k, arg := range args {
-        if len(arg)>= 2 && arg[0] == '-' && arg[1] == 'v' {
+        if len(arg)>= 2 && arg[0] == '-' && arg[1] == 'd' {
             self.debugLevel ++
             for i := 2; i < len(arg); i++ {
                 self.debugLevel ++
             }
             //remove -d+ from args
             args = append(args[:k], args[k+1:]...)
+            self.logger.SetLogLevel(util.LogLevel(self.debugLevel))
             break
         }
     }
     cmd := flag.NewFlagSet("gosch", flag.ContinueOnError)
+    cmd.Usage = func()  {
+        fmt.Printf("gosch version %v -- Usage:\n", self.version)
+        cmd.PrintDefaults()
+    }
     cmd.StringVar(&self.config.port, "port", "6697", "specify the port number to listen on")
-    cmd.StringVar(&self.config.address, "address", "localhost", "specify the internet address to listen on")
-    cmd.StringVar(&self.config.certfile, "certfile", "", "specify the ssl PEM certificate to use for TLS server")
+    cmd.StringVar(&self.config.address, "address", "localhost", "specify the internet address or hostname to listen on")
+    cmd.StringVar(&self.config.certfile, "certfile", "",
+            "specify the ssl PEM certificate/key to use for TLS server")
     cmd.StringVar(&self.config.password, "password", "", "specify the connection password")
     cmd.UintVar(&self.config.maxChannels, "maxchannels", 8, "maximum number of channels a user can join")
     cmd.UintVar(&self.config.timeout, "clienttimeout", 60, "idle client timeout in seconds")
     cmd.BoolVar(&self.config.doSelfsigned, "selfsigned", false, "create a selfsigned certificate use (development use only)")
-    cmd.Bool("v", false, "set verbosity level (use -vv to increase debug level)")
+    cmd.StringVar(&self.config.logfile, "logfile", "", "log to specified file")
+    cmd.StringVar(&self.config.sysgroup, "group", "", "change to this OS group before serving requests")
+    cmd.StringVar(&self.config.sysuser, "user", "", "change to this OS user before serving requests")
+    cmd.StringVar(&self.config.pidfile, "pidfile", "", "write the process ID to this file")
+    cmd.BoolVar(&self.config.isDaemon, "daemon", false, "give up controlling terminal and serve in background")
+    //dummy
+    cmd.Bool("d", false, "set verbosity level (use -dd.. to increase debug level)")
     err := cmd.Parse(args)
     if err != nil {
         return err
+    }
+    if len(self.config.logfile) > 0 {
+        fd, err := os.OpenFile(self.config.logfile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+        if err != nil {
+            panic(err)
+        }
+        self.logger.AddSink(fd)
     }
     tmp, err := strconv.Atoi(self.config.port)
     if err != nil  || tmp > int(^uint16(0)) {
@@ -215,9 +235,9 @@ func (self *ircd) findClientByNick(nick string) *ircclient {
 }
 func NewServer(args []string) (*ircd, error) {
     rv := new(ircd)
-    rv.version = "Gosch IRC 19.6"
+    rv.version = SERVER_VERSION
     rv.created = time.Now()
-    rv.logger  = log.New(os.Stdout, "ircd ", log.LstdFlags)
+    rv.logger  = util.NewLogger("ircd")
     if err := rv.parseArgs(args); err != nil {
         return nil, err
     }
@@ -236,7 +256,7 @@ func (self *ircd) onDisconnect(client *ircclient) error {
         self.trace("onDisconnect: removing from %v members=%v", ch.name, ch.members)
         if len(ch.members) > 0 {
             self.deliverToChannel(&ch.name,
-                client.makeMessage(":%s QUIT %s :%s", client.getIdent(), ch.name, client.doneMessage))
+                client.makeMessage(":%s QUIT :%s", client.getIdent(), client.doneMessage))
         }
         ch.RemoveClient(client)
     }

@@ -29,6 +29,7 @@ type ircclient struct {
     pingTimer *time.Timer
     permissions string
     password string
+    hostname string
     hashedname string
     mode string
     isBroken bool
@@ -46,6 +47,14 @@ func NewClient(conn net.Conn, server *ircd) *ircclient {
     rv.hashedname = fmt.Sprintf("%x", h)
     rv.outQueue = make(chan string)
     rv.channels = make(map[string]*ircchannel)
+    addr := strings.Split(rv.id, ":")
+    rv.hostname = "unknown"
+    if len(addr) >= 1 {
+        hosts, err := net.LookupAddr(addr[0])
+        if err == nil {
+            rv.hostname = hosts[0]
+        }
+    }
     return rv
 }
 func (self *ircclient) Kill(errormsg string) {
@@ -84,7 +93,8 @@ func (self *ircclient) onRegistered() {
     self.registered = true
     self.log("registered user %s", self.getIdent())
     self.numericReply(RPL_WELCOME, self.nickname)
-    self.numericReply(RPL_YOURHOST, self.server.servername, self.server.version)
+    self.numericReply(RPL_YOURHOST, self.server.servername,
+            fmt.Sprintf("gosch %s", self.server.version))
     self.numericReply(RPL_CREATED, self.server.created.Format(time.RFC3339))
     self.numericReply(RPL_MYINFO, self.server.servername, self.server.version, "i", "i")
     //LUSER response  (pidgin needs this)
@@ -142,6 +152,15 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     }()
     self.trace2("msg=%v",msg)
     msg.source = self
+    if ! self.registered {
+        switch msg.command {
+        case "CAP","NICK","USER","PASS":
+            //nop
+        default:
+            self.debug("[unregistered] received command %s", msg.command)
+            return
+        }
+    }
     switch msg.command {
     case "CAP":
         //self.log("TODO implement capability negotiation")
@@ -170,7 +189,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(ERR_ALREADYREGISTRED)
             return
         }
-        if msg.NumParameters() != 4  { //user mdoe unused realname
+        if msg.NumParameters() != 4  { //user mode unused realname
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
             return
         }
@@ -316,6 +335,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         if len(msg.prefix) > 0 {
             //check if client owns prefix TODO
             if msg.prefix != self.getIdent() || msg.prefix  != self.nickname {
+                self.trace("QUIT invalid prefix: %v", msg)
                 return
             }
         }
@@ -574,8 +594,8 @@ func (self *ircclient) readIO() {
         return advance,token, err
     }
     scanner.Split(crlnSplit)
-    for self.done == false{
-        self.log("client connected")
+    for ! self.done {
+        self.log("connect from %s [%s]", self.id, self.hostname)
         for scanner.Scan() {
             msg, err := ircParseMessage(scanner.Text())
             if err != nil {
