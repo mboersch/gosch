@@ -1,5 +1,6 @@
+// Copyright (c) Marius Börschig. All rights reserved.
+// Licensed under the BSD-3-Clause License.
 package main
-//Copyright (C) 2019  Marius Boerschig <code (at) boerschig (dot) net>
 import (
     . "gosch/server"
     "os"

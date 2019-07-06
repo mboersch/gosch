@@ -1,4 +1,5 @@
-//Copyright (C) 2019  Marius Boerschig <code (at) boerschig (dot) net>
+// Copyright (c) Marius Börschig. All rights reserved.
+// Licensed under the BSD-3-Clause License.
 package server
 import (
     . "gosch/irc"
