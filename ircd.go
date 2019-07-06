@@ -2,7 +2,7 @@
 // Licensed under the BSD-3-Clause License.
 package main
 import (
-    . "gosch/server"
+    . "github.com/mboersch/gosch/server"
     "os"
     "flag"
 )
