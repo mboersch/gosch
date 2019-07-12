@@ -12,6 +12,7 @@ import (
     "strconv"
     "time"
     "sync"
+    "errors"
 )
 type config struct {
     //config
@@ -76,12 +77,17 @@ func (self *ircd) usage(msg string ) {
     os.Stderr.WriteString(fmt.Sprintf("ERROR: %s\n", msg))
 }
 func (self *ircd) parseArgs(args []string) error {
+    DebugFlagLoop:
     for k, arg := range args {
         if len(arg)>= 2 && arg[0] == '-' && arg[1] == 'd' {
-            self.debugLevel ++
-            for i := 2; i < len(arg); i++ {
-                self.debugLevel ++
+            c := 1
+            for i:= 2; i< len(arg); i++ {
+                if arg[i] != 'd' {
+                    break DebugFlagLoop
+                }
+                c ++
             }
+            self.debugLevel = c
             //remove -d+ from args
             args = append(args[:k], args[k+1:]...)
             self.logger.SetLogLevel(util.LogLevel(self.debugLevel))
@@ -111,6 +117,31 @@ func (self *ircd) parseArgs(args []string) error {
     err := cmd.Parse(args)
     if err != nil {
         return err
+    }
+    if cmd.NArg() > 0 {
+        cmd.PrintDefaults()
+        fmt.Printf("ERROR: additional unknown arguments: %v\n", cmd.Args())
+        return errors.New("unkown arguments")
+    }
+    if self.config.isDaemon {
+        //Experimental: forkexec does not work and C.daemon() does something bad
+        //remove --daemon from flags, and forkexec ourselves
+        cmdargs := make([]string, cmd.NFlag()+ cmd.NArg() + 1)
+        cmdargs[0] = os.Args[0]
+        cmd.Visit(func(flg *flag.Flag) {
+            if flg.Name != "daemon" {
+                cmdargs = append(cmdargs, fmt.Sprintf("--%s %v", flg.Name, flg.Value))
+            }
+        })
+        if cmd.NArg() > 0 {
+            cmdargs = append(cmdargs, cmd.Args()...)
+        }
+        self.log("going to background")
+        err = util.CDaemonize()
+        if err != nil {
+            self.log("error going to background: %s", err)
+            os.Exit(-1)
+        }
     }
     if len(self.config.logfile) > 0 {
         fd, err := os.OpenFile(self.config.logfile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -290,7 +321,7 @@ func (self *ircd) Run() {
         self.log("cannot get hostname: %s", err)
         myhost = self.config.address //back to default
     }
-    self.log("hostname: %s", myhost)
+    self.log("hostname: %s pid %v", myhost, os.Getpid())
     if  host == myhost {
         host = "" //listen to all
     }
