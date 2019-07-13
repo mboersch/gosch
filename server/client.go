@@ -35,6 +35,7 @@ type ircclient struct {
     mode string
     isBroken bool
     badBehavior int
+    awayMessage string
 }
 
 // ircclient
@@ -140,6 +141,74 @@ func (self *ircclient) trace2(msg string, args ...interface{}) {
         self.server.trace("[%s] %s", self.id, fmt.Sprintf(msg, args...))
     }
 }
+func (self *ircclient) handleChannelMode(msg *ircmessage) {
+    //TODO implement modes
+    tgt := msg.FirstParameter()
+    self.numericReply(ERR_NOCHANMODES, *tgt)
+}
+func (self *ircclient) setMode(mod rune) {
+    // add mode flag
+    self.mode += string(mod)
+}
+func (self *ircclient) clearMode(mod rune) {
+    var tmp string
+    for _, t := range self.mode {
+        if t != mod {
+            tmp += string(t)
+        }
+    }
+    self.mode = tmp
+}
+func (self *ircclient) testMode(mod rune) bool {
+    for _, t := range self.mode {
+        if t == mod {
+            return true
+        }
+    }
+    return false
+}
+func (self *ircclient) isAway() bool {
+    return self.testMode('a')
+}
+func (self *ircclient) isOperator() bool {
+    return self.testMode('o')
+}
+func (self *ircclient) isInvisible() bool {
+    return self.testMode('o')
+}
+func (self *ircclient) handleUserMode(msg *ircmessage) {
+    tgt := msg.FirstParameter()
+    // User modes
+    if *tgt != self.nickname {
+        self.trace("invalid target in mode %v", msg)
+        self.numericReply(ERR_USERSDONTMATCH)
+        return
+    }
+    if msg.NumParameters() != 2 {
+        self.trace("invaldi num parameter %v", msg)
+        self.numericReply(ERR_UMODEUNKNOWNFLAG)
+        return
+    }
+    c := msg.parameters[1] //the encoded mode string (+-)
+    if len(c)>1 || ! IsValidUserMode(c[1]) {
+        self.numericReply(ERR_UMODEUNKNOWNFLAG)
+        return
+    }
+    if len(c) == 2 {
+        if c[0] == '+' {
+            //set
+            if IsValidUserMode(c[1]) && UserMaySetMode(c[1]){
+                self.mode += string(c[1])
+            }
+        } else if c[0] ==  '-' && UserMayClearMode(c[1]) {
+            //unset
+            self.clearMode(rune(c[1]))
+        }
+    }
+    //get results
+    self.numericReply(RPL_UMODEIS, self.mode)
+    return
+}
 func (self *ircclient) handleMessage(msg *ircmessage) {
     //only handle NICK, PASS, USER, CAP for registration
     if msg == nil {
@@ -234,41 +303,21 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(ERR_USERSDONTMATCH)
             return
         }
-        for _, c := range msg.parameters[1:]{
-            if IsChannelName(*tgt) {
-                if len(c) > 1 && ! IsValidChannelMode(c[1]) {
-                    self.numericReply(ERR_UNKNOWNMODE, string(c[1]), *tgt)
-                    return
-                }
-                self.numericReply(ERR_NOCHANMODES, *tgt) //TODO implement modes
-            } else {
-                // User modes
-                if len(c)  < 2 || ! IsValidUserMode(c[1]) {
-                    self.numericReply(ERR_UMODEUNKNOWNFLAG)
-                    return
-                }
-                if len(c) == 2 {
-                    if c[0] == '+' {
-                        //XXX not implemented modes
-                        if IsValidUserMode(c[1]){
-                            self.mode += string(c[1])
-                        }
-                    } else if c[0] ==  '-' {
-                        var tmp string
-                        for _, t := range self.mode {
-                            if t != rune(c[1]) {
-                                tmp += string(t)
-                            }
-                        }
-                        self.mode = tmp
-                    } else {
-                        self.numericReply(ERR_UMODEUNKNOWNFLAG)
-                        return
-                    }
-                }
-            }
+        if IsChannelName(*tgt) {
+            self.handleChannelMode(msg)
+        } else {
+            self.handleUserMode(msg)
         }
-        self.numericReply(RPL_UMODEIS, self.mode)
+        return
+    case "AWAY":
+        if msg.NumParameters() == 0 {
+            self.clearMode('a')
+            self.numericReply(RPL_UNAWAY)
+        } else {
+            self.setMode('a')
+            self.awayMessage = msg.trailing
+            self.numericReply(RPL_NOWAWAY)
+        }
     case "USERHOST":
         if msg.NumParameters() < 1 || msg.NumParameters() > 5 {
             self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
@@ -407,7 +456,11 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             cl.server.servername, cl.hashedname, cl.realname)
         var tmp strings.Builder
         for _, ch := range cl.channels {
-            //TODO + and @
+            if ch.isOperator(cl.nickname) {
+                tmp.WriteString("@")
+            } else if ch.isVoice(cl.nickname) {
+                tmp.WriteString("+")
+            }
             tmp.WriteString(ch.name)
             tmp.WriteString(" ")
         }
@@ -466,9 +519,6 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     default:
         self.log("unknown msg <- %v", msg)
     }
-}
-func (self *ircclient) isAway() bool {
-    return false //TODO implement me
 }
 func (self *ircclient) makeMessage(tmpl string, args ...interface{}) (*ircmessage) {
     msg, _ := ircParseMessage(fmt.Sprintf(tmpl, args...))

@@ -13,6 +13,7 @@ const (
     IRC_valid_channel_modes string = "opsitnbv" //obsolete: "s"
     IRC_valid_channel_prefix string = "&#+!"
     IRC_max_channel_name_length int = 50
+    IRC_max_message_length int = 512
 )
 func IsChannelName(in string) bool {
     for _, p := range IRC_valid_channel_prefix {
@@ -24,6 +25,12 @@ func IsChannelName(in string) bool {
 }
 func IsValidUserMode(mod byte) bool {
     return strings.Index(IRC_valid_user_modes, string(mod)) != -1
+}
+func UserMaySetMode(mod byte) bool {
+    return mod != 'O' && mod != 'o'
+}
+func UserMayClearMode(mod byte) bool{
+    return mod != 'a'
 }
 func IsValidChannelMode(mod byte) bool {
     return strings.Index(IRC_valid_channel_modes, string(mod)) != -1
@@ -113,6 +120,9 @@ const ( //XXX there must be a cleaner way, without all the NumericReply boilerpl
     RPL_ENDOFWHOIS NumericReply = 318
     RPL_WHOISCHANNELS NumericReply = 319
     RPL_AWAY NumericReply = 301
+    //AWAY
+    RPL_UNAWAY NumericReply = 305
+    RPL_NOWAWAY NumericReply = 306
 )
 //NumericMap maps numeric reply codes to response strings as given in the RFCs.
 var NumericMap  = map[NumericReply]string{
@@ -192,6 +202,9 @@ var NumericMap  = map[NumericReply]string{
     RPL_ENDOFWHOIS: "%s :End of WHOIS list", //nick
     RPL_WHOISCHANNELS: "%s : %s", //nick, +@channel (might appear more than once)
     RPL_AWAY: "%s :%s", //nick, awaymsg
+    //AWAY
+    RPL_UNAWAY: ":You are no longer marked as being away",
+    RPL_NOWAWAY: ":You have been marked as being away",
 }
 
 type Message interface {

@@ -5,6 +5,7 @@ import (
     "fmt"
     "strings"
     "strconv"
+    "github.com/mboersch/gosch/irc"
 )
 type ircmessage struct {
     raw string
@@ -85,6 +86,9 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
     if len(raw) < 3  {
         return nil, nil
     }
+    if len(raw) > irc.IRC_max_message_length {
+        return nil, ircError{-5, "message too long"}
+    }
     if strings.Index(raw, "\r\n") != -1 {
         return nil, ircError{-4, "raw message contains CR LN!"}
     }
@@ -113,7 +117,7 @@ func ircParseMessage( raw string) (msg *ircmessage, err error) {
         }
     }
     //command up to whitespace
-    rv.command = raw[0:idx]
+    rv.command = strings.ToUpper(raw[0:idx])
     raw = raw[idx:]
     raw = strings.TrimLeft(raw, space)
     //params, muliple whitespace separated, trailer might be ":" separated

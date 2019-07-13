@@ -46,6 +46,18 @@ func (self *ircchannel) getUserFlags(nick string) string {
     return ""
 }
 
+func (self *ircchannel) isOperator(nick string) bool {
+    for mod := range self.getUserFlags(nick) {
+        if mod == 'o' { return true}
+    }
+    return false
+}
+func (self *ircchannel) isVoice(nick string) bool {
+    for mod := range self.getUserFlags(nick) {
+        if mod == 'v' { return true}
+    }
+    return false
+}
 func (self *ircchannel) getNicks() []string {
     rv := make([]string, len(self.members))
     for n:= range self.members {
@@ -54,9 +66,6 @@ func (self *ircchannel) getNicks() []string {
     return rv
 }
 
-func (self *ircchannel) isOperator(nick string) bool {
-    return false
-}
 func (self *ircchannel) isMember(nick string) bool {
     for user :=  range self.members {
         if  nick == user {

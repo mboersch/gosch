@@ -239,7 +239,7 @@ func (self *ircd) deliver(msg *ircmessage) {
                     self.log("ERROR: got directed message that is not privmsg/notice!: %v", msg)
                     return
                 }
-                if len(msg.trailing) < 1 {
+                if msg.NumParameters() < 2 {
                     msg.source.numericReply(ERR_NOTEXTTOSEND)
                     return
                 }
@@ -248,6 +248,9 @@ func (self *ircd) deliver(msg *ircmessage) {
                     msg.source.numericReply(ERR_NOSUCHNICK, *tgt)
                     return
                 }
+                if cl.isAway() {
+                    msg.source.numericReply(RPL_AWAY, cl.nickname, cl.awayMessage)
+                }
                 cl.outQueue <- msg.GetRaw()
             }
         } else {
@@ -255,7 +258,7 @@ func (self *ircd) deliver(msg *ircmessage) {
             msg.source.outQueue <- msg.GetRaw()
         }
     case RPL_TOPIC.String(), RPL_TOPICWHOTIME.String():
-        if len(msg.parameters) >= 2 {
+        if msg.NumParameters() >= 2 {
             if IsChannelName(msg.parameters[1]) {
                 self.deliverToChannel(&msg.parameters[1], msg)
             } else if cl := self.findClientByNick(msg.parameters[1]); cl != nil {
@@ -295,6 +298,12 @@ func (self *ircd) addClient(client *ircclient) {
 func (self *ircd) onDisconnect(client *ircclient) error {
     // send quit message to all channels
     for _, ch := range client.channels {
+        // sanity check
+        if ! ch.isMember(client.nickname) {
+            self.fatal("sanity check failed: client %v is not a member of %v",
+                client, ch)
+            client.Kill("inconsistent state between client and  channel")
+        }
         self.trace("onDisconnect: removing from %v members=%v", ch.name, ch.members)
         if len(ch.members) > 0 {
             self.deliverToChannel(&ch.name,
@@ -307,9 +316,11 @@ func (self *ircd) onDisconnect(client *ircclient) error {
 func (self *ircd) cleanup(force bool) {
     self.mutex.Lock()
     defer self.mutex.Unlock()
-
     for _, cl := range self.clients {
         if force || cl.done {
+            if force {
+                cl.done = true
+            }
             self.log("[%s] disconnected", cl.id)
             self.onDisconnect(cl)
         }
