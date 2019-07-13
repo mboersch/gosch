@@ -566,7 +566,7 @@ func (self *ircclient) writeIO() {
             self.lastActivity = time.Now().Unix()
         }
     }
-    self.server.cleanup()
+    self.server.cleanup(false)
 }
 func (self *ircclient) readIO() {
     scanner := bufio.NewScanner(self.conn)

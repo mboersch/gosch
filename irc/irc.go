@@ -11,7 +11,8 @@ const (
     IRC_ping_timeout int64  = 5
     IRC_valid_user_modes string = "iwoOra" //obsolete: "s"
     IRC_valid_channel_modes string = "opsitnbv" //obsolete: "s"
-    IRC_valid_channel_prefix string = "&#"
+    IRC_valid_channel_prefix string = "&#+!"
+    IRC_max_channel_name_length int = 50
 )
 func IsChannelName(in string) bool {
     for _, p := range IRC_valid_channel_prefix {

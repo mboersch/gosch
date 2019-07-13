@@ -8,6 +8,7 @@ import (
     "fmt"
     "flag"
     "os"
+    "os/signal"
     "net"
     "strconv"
     "time"
@@ -56,6 +57,8 @@ type ircd struct {
     version string
     debugLevel int
     servername string
+    listenSock  net.Listener
+    isRunning bool
 }
 
 func (self *ircd) trace(msg string, args ...interface{}) {
@@ -71,7 +74,13 @@ func (self *ircd) log(msg string, args ...interface{}) {
     }
     self.logger.Info(msg, args...)
 }
-
+func (self *ircd) fatal(msg string, args ...interface{}){
+    if self.logger == nil {
+        fmt.Printf(msg, args...)
+        return
+    }
+    self.logger.Error(msg, args...)
+}
 func (self *ircd) usage(msg string ) {
     flag.PrintDefaults()
     os.Stderr.WriteString(fmt.Sprintf("ERROR: %s\n", msg))
@@ -275,6 +284,7 @@ func NewServer(args []string) (*ircd, error) {
     }
     rv.clients = make(map[string]*ircclient)
     rv.channels = make(map[string]*ircchannel)
+    rv.handleSignals()
     return rv, nil
 }
 func (self *ircd) addClient(client *ircclient) {
@@ -294,26 +304,48 @@ func (self *ircd) onDisconnect(client *ircclient) error {
     }
     return nil
 }
-func (self *ircd) cleanup() {
+func (self *ircd) cleanup(force bool) {
     self.mutex.Lock()
     defer self.mutex.Unlock()
 
     for _, cl := range self.clients {
-        if cl.done {
+        if force || cl.done {
             self.log("[%s] disconnected", cl.id)
             self.onDisconnect(cl)
         }
     }
 }
+func (self *ircd) handleSignals() {
+    sigs := make(chan os.Signal, 1)
+    signal.Notify(sigs, os.Interrupt, os.Kill)
+    go func() {
+        for sig := range sigs {
+            switch sig {
+            case os.Interrupt, os.Kill:
+                self.fatal("received signal %v. shutting down.", sig)
+                self.Stop()
+            }
+        }
+    }()
+}
+func (self *ircd) Stop(){
+    if ! self.isRunning {
+        return
+    }
+    self.isRunning = false
+    if self.listenSock != nil{
+        _ = self.listenSock.Close()
+    }
+}
 func (self *ircd) Run() {
+    self.isRunning = true
+    // setup ssl socket
     crt, err := tls.LoadX509KeyPair(self.config.certfile, self.config.certfile)
     if err != nil {
         self.log("Cannot load cert/key pair: %s", err)
         return
     }
     cfg := &tls.Config{Certificates: []tls.Certificate{crt}}
-
-
 
     host := self.config.address
     myhost, err := os.Hostname()
@@ -332,6 +364,7 @@ func (self *ircd) Run() {
         return
     }
     defer l.Close()
+    self.listenSock = l //saved for Stop() 
     self.log("Listening on %s", l.Addr())
 
     self.servername = myhost
@@ -339,18 +372,22 @@ func (self *ircd) Run() {
     if err != nil {
         self.servername = hostnames[0]
     }
-
+    // handle network requests
     for {
         cl, err :=  l.Accept()
+        if ! self.isRunning {
+            break
+        }
         if err != nil {
             self.log("ERROR: cannot accept client %v", err)
             continue
         }
         tlsconn := tls.Server(cl, cfg)
         client := NewClient(tlsconn, self)
-        client.Start()
         self.addClient(client)
+        client.Start()
     }
+    self.cleanup(true)
 }
 
 func (self *ircd) joinChannel(channel, key string, client *ircclient){

@@ -2,7 +2,9 @@
 // Licensed under the BSD-3-Clause License.
 package server
 import (
+    "github.com/mboersch/gosch/irc"
     "time"
+    "strings"
 )
 //ircchannel 
 type ircchannel struct {
@@ -65,4 +67,16 @@ func (self *ircchannel) isMember(nick string) bool {
 }
 func (ircc ircchannel) String() string {
     return ircc.name
+}
+func IsValidChannelName(nameToTest string) bool {
+    if len(nameToTest) > irc.IRC_max_channel_name_length {
+        return false
+    }
+    if ! irc.IsChannelName(nameToTest) {
+        return false
+    }
+    if strings.IndexByte(nameToTest, ' ') != -1 { return false }
+    if strings.IndexByte(nameToTest, ',') != -1 { return false }
+    if strings.IndexByte(nameToTest, '\x07') != -1 { return false } //Ctrl-G
+    return true
 }
