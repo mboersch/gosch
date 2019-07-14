@@ -63,6 +63,7 @@ const ( //XXX there must be a cleaner way, without all the NumericReply boilerpl
     ERR_ERRONEUSNICKNAME NumericReply = 432
     ERR_NICKNAMEINUSE NumericReply = 433
     ERR_NICKCOLLISION NumericReply = 436
+    ERR_NOTREGISTERED NumericReply = 451
     // USER
     ERR_NEEDMOREPARAMS NumericReply = 461
     ERR_ALREADYREGISTRED NumericReply = 462
@@ -142,6 +143,7 @@ var NumericMap  = map[NumericReply]string{
     ERR_ERRONEUSNICKNAME: "%s :Erroneus nickname", //nick
     ERR_NICKNAMEINUSE: "%s :Nickname is already in use", //nick
     ERR_NICKCOLLISION: "%s :Nickname collision KILL", //nick
+    ERR_NOTREGISTERED: ":You have not registered",
     // USER
     ERR_NEEDMOREPARAMS: "%s :Not enough parameters", //command
     ERR_ALREADYREGISTRED: ":You may not reregister",

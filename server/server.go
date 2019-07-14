@@ -302,7 +302,6 @@ func (self *ircd) onDisconnect(client *ircclient) error {
         if ! ch.isMember(client.nickname) {
             self.fatal("sanity check failed: client %v is not a member of %v",
                 client, ch)
-            client.Kill("inconsistent state between client and  channel")
         }
         self.trace("onDisconnect: removing from %v members=%v", ch.name, ch.members)
         if len(ch.members) > 0 {
@@ -329,12 +328,17 @@ func (self *ircd) cleanup(force bool) {
 func (self *ircd) handleSignals() {
     sigs := make(chan os.Signal, 1)
     signal.Notify(sigs, os.Interrupt, os.Kill)
+    var nint int = 0
     go func() {
         for sig := range sigs {
             switch sig {
             case os.Interrupt, os.Kill:
                 self.fatal("received signal %v. shutting down.", sig)
                 self.Stop()
+                nint ++
+                if(nint > 1) {
+                    os.Exit(1)
+                }
             }
         }
     }()
@@ -343,6 +347,7 @@ func (self *ircd) Stop(){
     if ! self.isRunning {
         return
     }
+    self.log("Stopping I/O")
     self.isRunning = false
     if self.listenSock != nil{
         _ = self.listenSock.Close()
@@ -433,7 +438,7 @@ func (self *ircd) registerNickname(nick string, client *ircclient) bool {
     if cl != nil {
         if cl != client {
             //some other client has the nick
-            self.trace("%v wants %s which is taken by %v", client.id, nick, cl.id)
+            self.trace("%v wants %s which is taken by %v", client.id, nick, cl.getIdent())
             return false
         }
     }

@@ -185,7 +185,7 @@ func (self *ircclient) handleUserMode(msg *ircmessage) {
         return
     }
     if msg.NumParameters() != 2 {
-        self.trace("invaldi num parameter %v", msg)
+        self.trace("invalid num parameter %v", msg)
         self.numericReply(ERR_UMODEUNKNOWNFLAG)
         return
     }
@@ -198,7 +198,7 @@ func (self *ircclient) handleUserMode(msg *ircmessage) {
         if c[0] == '+' {
             //set
             if IsValidUserMode(c[1]) && UserMaySetMode(c[1]){
-                self.mode += string(c[1])
+                self.setMode(rune(c[1]))
             }
         } else if c[0] ==  '-' && UserMayClearMode(c[1]) {
             //unset
@@ -228,6 +228,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             //nop
         default:
             self.debug("[unregistered] received command %s", msg.command)
+            self.numericReply(ERR_NOTREGISTERED)
             return
         }
     }
@@ -237,7 +238,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     case "NICK":
         tgt := msg.FirstParameter()
         if tgt == nil {
-            self.numericReply(ERR_ERRONEUSNICKNAME)
+            self.numericReply(ERR_NONICKNAMEGIVEN)
             return
         }
         for _,c := range *tgt {
@@ -567,8 +568,6 @@ func (self *ircclient) onJoin(channel string) {
     }
 }
 func (self *ircclient) numericReply(num NumericReply, args ...interface{}) {
-    //TODO XXX
-    // should look like :localhost 001 marius :Welcom fooba ?
     msg := ""
     if tmp, ok := NumericMap[num]; ok {
         msg = tmp
@@ -578,7 +577,12 @@ func (self *ircclient) numericReply(num NumericReply, args ...interface{}) {
     } else {
         self.log("numeric not in map: %d", num)
     }
-    self.send(":%s %s %s %s", self.server.servername, num.String(), self.nickname, msg)
+    nick := self.nickname
+    if ! self.registered && num == ERR_NICKNAMEINUSE {
+        //nickname might be undefined
+        nick = args[0].(string)
+    }
+    self.send(":%s %s %s %s", self.server.servername, num.String(), nick, msg)
 }
 func (self *ircclient) send(tmpl string, args ...interface{}) {
     self.trace(tmpl, args...)
