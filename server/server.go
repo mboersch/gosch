@@ -196,7 +196,7 @@ func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) {
         self.debug("deliver: ignoring msg on non-existing channel %s", *tgt)
         return
     }
-    if ! ch.isMember(msg.source.nickname) {
+    if ! ch.isMember(msg.source) {
         self.debug("deliver: %s is not a member of %s", msg.source.nickname, *tgt)
         msg.source.numericReply(ERR_CANNOTSENDTOCHAN, ch.name)
         return
@@ -268,8 +268,6 @@ func (self *ircd) deliver(msg *ircmessage) {
     }
 }
 func (self *ircd) findClientByNick(nick string) *ircclient {
-    self.mutex.Lock()
-    defer self.mutex.Unlock()
     for _, cl := range self.clients {
         if cl.nickname == nick {
             return cl
@@ -299,7 +297,7 @@ func (self *ircd) onDisconnect(client *ircclient) error {
     // send quit message to all channels
     for _, ch := range client.channels {
         // sanity check
-        if ! ch.isMember(client.nickname) {
+        if ! ch.isMember(client) {
             self.fatal("sanity check failed: client %v is not a member of %v",
                 client, ch)
         }
@@ -434,6 +432,9 @@ func (self *ircd) partChannel(channel string, client *ircclient) bool {
     return true
 }
 func (self *ircd) registerNickname(nick string, client *ircclient) bool {
+    self.mutex.Lock()
+    defer self.mutex.Unlock()
+    self.debug("server: register nick %s for %v", nick, client.getIdent())
     cl := self.findClientByNick(nick)
     if cl != nil {
         if cl != client {

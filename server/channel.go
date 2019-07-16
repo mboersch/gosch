@@ -66,8 +66,8 @@ func (self *ircchannel) getNicks() []string {
     return rv
 }
 
-func (self *ircchannel) isMember(nick string) bool {
-    for user :=  range self.members {
+func (self *ircchannel) isMember(nick *ircclient) bool {
+    for _, user :=  range self.members {
         if  nick == user {
             return true
         }

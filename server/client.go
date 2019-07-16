@@ -59,6 +59,10 @@ func NewClient(conn net.Conn, server *ircd) *ircclient {
     }
     return rv
 }
+func (self *ircclient) String() string {
+    return fmt.Sprintf("<Client: %s!%s@%s>",
+        self.username, self.realname, self.id)
+}
 func (self *ircclient) Kill(errormsg string) {
     self.done = true
     self.doneMessage = errormsg
@@ -209,6 +213,12 @@ func (self *ircclient) handleUserMode(msg *ircmessage) {
     self.numericReply(RPL_UMODEIS, self.mode)
     return
 }
+func (self *ircclient) broadcastToChannel(msg *ircmessage) {
+    //notify all peers in my channels
+    for _, ch := range self.channels {
+        self.server.deliverToChannel(&ch.name, msg)
+    }
+}
 func (self *ircclient) handleMessage(msg *ircmessage) {
     //only handle NICK, PASS, USER, CAP for registration
     if msg == nil {
@@ -236,6 +246,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     case "CAP":
         //self.log("TODO implement capability negotiation")
     case "NICK":
+        oldnick := self.nickname
         tgt := msg.FirstParameter()
         if tgt == nil {
             self.numericReply(ERR_NONICKNAMEGIVEN)
@@ -252,8 +263,12 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.behavesBad()
             return
         }
-        if len(self.username)  >0 && len(self.realname) > 0 {
-            self.onRegistered()
+        if self.registered {
+            self.broadcastToChannel(self.makeMessage(":%s NICK %s", oldnick, self.nickname))
+        } else {
+            if len(self.username)  >0 && len(self.realname) > 0 {
+                self.onRegistered()
+            }
         }
     case "USER":
         if self.registered {
@@ -371,7 +386,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                 self.numericReply(ERR_NOSUCHCHANNEL, tgt)
                 return
             }
-            if ! ch.isMember(self.nickname) {
+            if ! ch.isMember(self) {
                 self.numericReply(ERR_NOTONCHANNEL, tgt)
                 return
             }
@@ -497,7 +512,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(RPL_NOTOPIC, *tgt)
             return
         }
-        if ! ch.isMember(self.nickname) {
+        if ! ch.isMember(self) {
             self.trace("TOPIC not a member")
             self.numericReply(ERR_NOTONCHANNEL, ch.name)
             return
