@@ -196,7 +196,7 @@ func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) {
         self.debug("deliver: ignoring msg on non-existing channel %s", *tgt)
         return
     }
-    if ! ch.isMember(msg.source) {
+    if ! ch.IsMember(msg.source) {
         self.debug("deliver: %s is not a member of %s", msg.source.nickname, *tgt)
         msg.source.numericReply(ERR_CANNOTSENDTOCHAN, ch.name)
         return
@@ -248,7 +248,7 @@ func (self *ircd) deliver(msg *ircmessage) {
                     msg.source.numericReply(ERR_NOSUCHNICK, *tgt)
                     return
                 }
-                if cl.isAway() {
+                if cl.IsAway() {
                     msg.source.numericReply(RPL_AWAY, cl.nickname, cl.awayMessage)
                 }
                 cl.outQueue <- msg.GetRaw()
@@ -297,7 +297,7 @@ func (self *ircd) onDisconnect(client *ircclient) error {
     // send quit message to all channels
     for _, ch := range client.channels {
         // sanity check
-        if ! ch.isMember(client) {
+        if ! ch.IsMember(client) {
             self.fatal("sanity check failed: client %v is not a member of %v",
                 client, ch)
         }
@@ -409,12 +409,18 @@ func (self *ircd) joinChannel(channel, key string, client *ircclient){
     self.mutex.Lock()
     defer self.mutex.Unlock()
     ch := self.getChannel(channel)
+    isop := false
     if ch ==  nil {
         //does not exist yet
         ch = NewChannel(channel)
         self.channels[ch.name] = ch
+        isop = true
     }
     ch.AddClient(client)
+    if isop {
+        ch.SetUserFlag(client, 'O')
+        ch.SetUserFlag(client, 'o')
+    }
     client.onJoin(channel)
 }
 func (self *ircd) partChannel(channel string, client *ircclient) bool {

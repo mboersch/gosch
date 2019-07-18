@@ -9,7 +9,7 @@ import (
 )
 const (
     IRC_ping_timeout int64  = 5
-    IRC_valid_user_modes string = "iwoOra" //obsolete: "s"
+    IRC_valid_user_modes string = "iwoOr" //obsolete: "s"
     IRC_valid_channel_modes string = "opsitnbv" //obsolete: "s"
     IRC_valid_channel_prefix string = "&#+!"
     IRC_max_channel_name_length int = 50
@@ -23,16 +23,16 @@ func IsChannelName(in string) bool {
     }
     return false
 }
-func IsValidUserMode(mod byte) bool {
+func IsValidUserMode(mod rune) bool {
     return strings.Index(IRC_valid_user_modes, string(mod)) != -1
 }
-func UserMaySetMode(mod byte) bool {
+func UserMaySetUserMode(mod rune) bool {
     return mod != 'O' && mod != 'o'
 }
-func UserMayClearMode(mod byte) bool{
+func UserMayClearMode(mod rune) bool{
     return mod != 'a'
 }
-func IsValidChannelMode(mod byte) bool {
+func IsValidChannelMode(mod rune) bool {
     return strings.Index(IRC_valid_channel_modes, string(mod)) != -1
 }
 type NumericReply uint

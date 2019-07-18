@@ -11,6 +11,7 @@ import (
     "strconv"
     "strings"
     "bytes"
+    "errors"
 )
 type ircclient struct {
     server *ircd
@@ -146,8 +147,50 @@ func (self *ircclient) trace2(msg string, args ...interface{}) {
     }
 }
 func (self *ircclient) handleChannelMode(msg *ircmessage) {
-    //TODO implement modes
+    //TODO implement modes:
+    // i invite-only
+    // m moderated
+    // s secret 
+    // b banmask
+    // e exception mask
+    // I invitation mask
     tgt := msg.FirstParameter()
+    if tgt == nil || !IsChannelName(*tgt) {
+        panic(errors.New(fmt.Sprintf("trying to set a channel mode on bad channel name: %v", tgt)))
+    }
+    ch := self.server.getChannel(*tgt)
+    if ch == nil || ! ch.IsMember(msg.source) {
+        self.numericReply(ERR_USERNOTINCHANNEL, msg.source.nickname, *tgt)
+        return
+    }
+    args := msg.parameters[1:]
+    if len(args) < 1 {
+        self.numericReply(ERR_NEEDMOREPARAMS, msg.command)
+        return
+    }
+    //parsing modes
+    // simple query, single char
+    if len(args) == 1 {
+        if len(args[0]) == 1{
+            switch args[0][0] {
+            case 'I':
+                //invitation list
+                self.numericReply(RPL_ENDOFINVITELIST, *tgt)
+                return
+            case 'O':
+                //channel creator
+                op := ch.GetCreator()
+                if op != nil {
+                    self.numericReply(RPL_UNIQOPIS, *tgt, op.nickname)
+                    return
+                }
+            case 'e':
+                //exception list
+                self.numericReply(RPL_ENDOFEXCEPTLIST, *tgt)
+                return
+            }
+        }
+    }
     self.numericReply(ERR_NOCHANMODES, *tgt)
 }
 func (self *ircclient) setMode(mod rune) {
@@ -171,13 +214,13 @@ func (self *ircclient) testMode(mod rune) bool {
     }
     return false
 }
-func (self *ircclient) isAway() bool {
+func (self *ircclient) IsAway() bool {
     return self.testMode('a')
 }
-func (self *ircclient) isOperator() bool {
+func (self *ircclient) IsOperator() bool {
     return self.testMode('o')
 }
-func (self *ircclient) isInvisible() bool {
+func (self *ircclient) IsInvisible() bool {
     return self.testMode('o')
 }
 func (self *ircclient) handleUserMode(msg *ircmessage) {
@@ -188,25 +231,23 @@ func (self *ircclient) handleUserMode(msg *ircmessage) {
         self.numericReply(ERR_USERSDONTMATCH)
         return
     }
-    if msg.NumParameters() != 2 {
-        self.trace("invalid num parameter %v", msg)
-        self.numericReply(ERR_UMODEUNKNOWNFLAG)
-        return
-    }
-    c := msg.parameters[1] //the encoded mode string (+-)
-    if len(c)>1 || ! IsValidUserMode(c[1]) {
-        self.numericReply(ERR_UMODEUNKNOWNFLAG)
-        return
-    }
-    if len(c) == 2 {
-        if c[0] == '+' {
-            //set
-            if IsValidUserMode(c[1]) && UserMaySetMode(c[1]){
-                self.setMode(rune(c[1]))
+    if msg.NumParameters() == 2 {// MODE NICK +X
+        c := msg.parameters[1] //the encoded mode string (+-)
+        if len(c)>1 && !IsValidUserMode(rune(c[1])) {
+            self.trace("invalid flag: %v", c)
+            self.numericReply(ERR_UMODEUNKNOWNFLAG)
+            return
+        }
+        if len(c) == 2 {
+            if c[0] == '+' {
+                //set
+                if IsValidUserMode(rune(c[1])) && UserMaySetUserMode(rune(c[1])){
+                    self.setMode(rune(c[1]))
+                }
+            } else if c[0] ==  '-' && UserMayClearMode(rune(c[1])) {
+                //unset
+                self.clearMode(rune(c[1]))
             }
-        } else if c[0] ==  '-' && UserMayClearMode(c[1]) {
-            //unset
-            self.clearMode(rune(c[1]))
         }
     }
     //get results
@@ -227,6 +268,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     defer func() {
         if r:= recover(); r != nil {
             self.log("handleMessage: recovered from panic: msg=%v", msg)
+            self.Kill(fmt.Sprintf("panic %v", msg))
         }
         return
     }()
@@ -347,7 +389,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             //output is nickname=+hostname
             rv.WriteString(cl.nickname)
             rv.WriteString("=")
-            if cl.isAway() { rv.WriteString("-") } else { rv.WriteString("+") }
+            if cl.IsAway() { rv.WriteString("-") } else { rv.WriteString("+") }
             rv.WriteString(cl.hashedname[0:32])
             rv.WriteString(" ")
         }
@@ -386,7 +428,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                 self.numericReply(ERR_NOSUCHCHANNEL, tgt)
                 return
             }
-            if ! ch.isMember(self) {
+            if ! ch.IsMember(self) {
                 self.numericReply(ERR_NOTONCHANNEL, tgt)
                 return
             }
@@ -430,7 +472,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                         continue
                     }
                     mode := "H"
-                    if ch.isOperator(cl.nickname) {
+                    if ch.IsOperator(cl) {
                         mode += "@"
                     }
                     /*
@@ -472,9 +514,9 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             cl.server.servername, cl.hashedname, cl.realname)
         var tmp strings.Builder
         for _, ch := range cl.channels {
-            if ch.isOperator(cl.nickname) {
+            if ch.IsOperator(cl) {
                 tmp.WriteString("@")
-            } else if ch.isVoice(cl.nickname) {
+            } else if ch.IsVoice(cl) {
                 tmp.WriteString("+")
             }
             tmp.WriteString(ch.name)
@@ -512,7 +554,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
             self.numericReply(RPL_NOTOPIC, *tgt)
             return
         }
-        if ! ch.isMember(self) {
+        if ! ch.IsMember(self) {
             self.trace("TOPIC not a member")
             self.numericReply(ERR_NOTONCHANNEL, ch.name)
             return
@@ -552,12 +594,20 @@ func (self *ircclient) namReply(channel string) {
     // =, *, @ are prefixes for public, private, secret channels
     var users string
     needspc := false
-    for _,u := range ch.getNicks() {
+    tmp := ch.GetMembers()
+    self.trace("members=%v", tmp)
+    for _,cl := range ch.GetMembers() {
+        u := cl.nickname
         if len(u) > 0 {
             if needspc{
                 users +=" "
             }
-            user_flags := ch.getUserFlags(u)
+            user_flags :=""
+            if ch.IsOperator(cl) {
+                user_flags = "@"
+            } else if ch.IsVoice(cl) {
+                user_flags = "+"
+            }
             users += fmt.Sprintf("%s%s", user_flags, u)
             needspc = true
         }
