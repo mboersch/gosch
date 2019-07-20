@@ -64,7 +64,10 @@ func (self *ircclient) String() string {
     return fmt.Sprintf("<Client: %s!%s@%s>",
         self.username, self.realname, self.id)
 }
-func (self *ircclient) Kill(errormsg string) {
+func (self *ircclient) Kill(errormsg string, args ...interface{}) {
+    if len(args) > 0 {
+        errormsg = fmt.Sprintf(errormsg, args...)
+    }
     self.done = true
     self.doneMessage = errormsg
     self.registered = false
@@ -72,7 +75,7 @@ func (self *ircclient) Kill(errormsg string) {
         self.pingTimer.Stop()
     }
     self.conn.Close()
-    self.log("%s killed with %s", self.getIdent(), strconv.QuoteToASCII(errormsg))
+    self.log("%s killed with: %s", self.getIdent(), strconv.QuoteToASCII(errormsg))
     self.outQueue <- "" //make sure writeIO wakes up
 }
 func (self *ircclient) getIdent() string {
@@ -92,8 +95,7 @@ func (self *ircclient) onRegistered() {
     if len(self.server.config.password) > 0 {
         if self.password != self.server.config.password {
             self.numericReply(ERR_ALREADYREGISTRED)
-            self.log("invalid password: %v", self.password)
-            self.Kill("invalid password")
+            self.Kill("invalid password: %v", self.password)
             return
         }
     }
@@ -121,8 +123,7 @@ func (self *ircclient) onTimeout() {
         case now := <-self.pingTimer.C:
             dp := now.Unix() - self.lastPing
             if self.lastPing > 0  && dp >= int64(self.server.config.timeout) {
-                self.log("Ping timeout t=%d", dp)
-                self.Kill("Ping timeout")
+                self.Kill("Ping timeout t=%d", dp)
             }
             da := now.Unix() - self.lastActivity
             if da >= int64(self.server.config.timeout) {
@@ -170,6 +171,7 @@ func (self *ircclient) handleChannelMode(msg *ircmessage) {
     }
     //parsing modes
     // simple query, single char
+    // might be something like: MODE +mb *@192.168.0
     if len(args) == 1 {
         if len(args[0]) == 1{
             switch args[0][0] {
@@ -190,8 +192,9 @@ func (self *ircclient) handleChannelMode(msg *ircmessage) {
                 return
             }
         }
+    } else {
+        self.numericReply(RPL_CHANNELMODEIS, *tgt, ch.GetMode(), "") //TODO might add parameters here?
     }
-    self.numericReply(ERR_NOCHANMODES, *tgt)
 }
 func (self *ircclient) setMode(mod rune) {
     // add mode flag
@@ -267,8 +270,7 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
     }
     defer func() {
         if r:= recover(); r != nil {
-            self.log("handleMessage: recovered from panic: msg=%v", msg)
-            self.Kill(fmt.Sprintf("panic %v", msg))
+            self.Kill("panic %v", msg)
         }
         return
     }()
@@ -419,10 +421,6 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
         }
         tgts := strings.Split(msg.parameters[0], ",")
         for _, tgt := range tgts {
-            if len(tgt) < 1  {
-                self.numericReply(ERR_NOSUCHCHANNEL, tgt)
-                return
-            }
             ch := self.server.getChannel(tgt)
             if ch == nil {
                 self.numericReply(ERR_NOSUCHCHANNEL, tgt)
@@ -447,9 +445,10 @@ func (self *ircclient) handleMessage(msg *ircmessage) {
                 return
             }
         }
-        self.doneMessage=msg.trailing
+        self.doneMessage=msg.GetParameterString()
+        self.send("ERROR :Good bye!")
         self.server.onDisconnect(self)
-        self.Kill(fmt.Sprintf("quit %s", strconv.QuoteToASCII(msg.trailing)))
+        self.Kill("quit %s", strconv.QuoteToASCII(msg.GetParameterString()))
     case "WHO":
         if msg.NumParameters() < 1 {
             self.log("who without parameter received")
@@ -619,8 +618,7 @@ func (self *ircclient) onJoin(channel string) {
     ch := self.server.getChannel(channel)
     self.trace("onJoin %v: %s (%s)", ch, self.id, self.nickname)
     if ch == nil {
-        self.log("cannot get channel %s", channel)
-        self.Kill("join on non-existing channel")
+        self.Kill("join on non-existing channel %s", channel)
         return
     }
     //self.send(":%s JOIN %s", self.getIdent(), channel)
@@ -630,6 +628,11 @@ func (self *ircclient) onJoin(channel string) {
         self.numericReply(RPL_NOTOPIC, channel)
     } else {
         self.numericReply(RPL_TOPIC, channel, ch.topic)
+    }
+    if ch.IsOperator(self) {
+        self.server.deliverToChannel(&ch.name,
+            self.makeMessage(":%s MODE %s +o %s", self.server.servername, ch.name,
+                self.nickname))
     }
 }
 func (self *ircclient) numericReply(num NumericReply, args ...interface{}) {
@@ -650,6 +653,7 @@ func (self *ircclient) numericReply(num NumericReply, args ...interface{}) {
     self.send(":%s %s %s %s", self.server.servername, num.String(), nick, msg)
 }
 func (self *ircclient) send(tmpl string, args ...interface{}) {
+    if self.done { return }
     self.trace(tmpl, args...)
     self.outQueue <- fmt.Sprintf(tmpl, args...)
 }
@@ -670,16 +674,13 @@ func (self *ircclient) writeIO() {
             }
             n, err := self.connwriter.WriteString(msg)
             if err != nil {
-                self.log("error writing: %s",msg)
-                self.Kill(fmt.Sprintf("write error: %v", err))
+                self.Kill("write error: %v", err)
             }
             if n != len(msg) {
-                self.log("short write %d != %d", n, len(msg))
-                self.Kill("short write")
+                self.Kill("short write %d != %d", n, len(msg))
             }
             if err = self.connwriter.Flush(); err != nil {
-                self.log("send flush failed: %s", err)
-                return
+                self.Kill("flush failed: %s", err)
             }
             self.trace("Sent %s", strconv.QuoteToASCII(msg))
             self.lastActivity = time.Now().Unix()
@@ -719,8 +720,7 @@ func (self *ircclient) readIO() {
         for scanner.Scan() {
             msg, err := ircParseMessage(scanner.Text())
             if err != nil {
-                self.log("<- cannot parse message: %v", err)
-                self.Kill("invalid irc-message")
+                self.Kill("invalid irc-message: %v", err)
                 break
             }
             self.handleMessage(msg)
@@ -730,7 +730,7 @@ func (self *ircclient) readIO() {
         }
         //read done
         if ! self.done {
-            self.Kill("IO done")
+            self.Kill("readIO done")
         }
     }
 }

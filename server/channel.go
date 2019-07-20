@@ -99,6 +99,9 @@ func (self *ircchannel) GetMembers() []*ircclient {
     }
     return rv
 }
+func (self *ircchannel) GetMode() string {
+    return self.mode
+}
 
 func (self *ircchannel) IsMember(nick *ircclient) bool {
     for _, user :=  range self.members {

@@ -25,6 +25,17 @@ func (m *ircmessage) NumParameters() int {
     }
     return r
 }
+func (m* ircmessage) GetParameterString() string {
+    var rv strings.Builder
+    for _, b := range m.parameters {
+        rv.WriteString(b)
+        rv.WriteString(" ")
+    }
+    if m.hasTrailing {
+        rv.WriteString(m.trailing)
+    }
+    return rv.String()
+}
 func (m *ircmessage) String() string {
     var rv strings.Builder
     rv.WriteString("Msg<prefix=")
