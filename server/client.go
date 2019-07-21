@@ -1,5 +1,5 @@
 // Copyright (c) Marius Börschig. All rights reserved.
-// Licensed under the BSD-3-Clause License.
+// Licensed under the BSD 3-Clause License. See the LICENSE file.
 package server
 import (
     . "github.com/mboersch/gosch/irc"
@@ -92,8 +92,9 @@ func (self *ircclient) onRegistered() {
     if self.registered == true {
         return
     }
-    if len(self.server.config.password) > 0 {
-        if self.password != self.server.config.password {
+    if pwd := self.server.config.Get("password"); self.
+                server.config.IsSet("password") && len(pwd.String())> 0 {
+        if self.password != pwd.String(){
             self.numericReply(ERR_ALREADYREGISTRED)
             self.Kill("invalid password: %v", self.password)
             return
@@ -117,16 +118,20 @@ func (self *ircclient) onRegistered() {
 
 func (self *ircclient) onTimeout() {
     // keep client alive
+    timeout := self.server.config.GetInt("client-timeout")
+    if timeout == -1 {
+        panic("Invalid timeout config read")
+    }
     for ! self.done {
         self.pingTimer = time.NewTimer(time.Second)
         select {
         case now := <-self.pingTimer.C:
             dp := now.Unix() - self.lastPing
-            if self.lastPing > 0  && dp >= int64(self.server.config.timeout) {
+            if self.lastPing > 0  && dp >= int64(timeout) {
                 self.Kill("Ping timeout t=%d", dp)
             }
             da := now.Unix() - self.lastActivity
-            if da >= int64(self.server.config.timeout) {
+            if da >= timeout {
                 self.lastPing = time.Now().Unix()
                 self.send("PING %d", self.lastPing)
             }
@@ -143,7 +148,7 @@ func (self *ircclient) trace(msg string, args ...interface{}) {
     self.server.trace("[%s] %s", self.id, fmt.Sprintf(msg, args...))
 }
 func (self *ircclient) trace2(msg string, args ...interface{}) {
-    if self.server.debugLevel > 2 {
+    if self.server.config.DebugLevel > 2 {
         self.server.trace("[%s] %s", self.id, fmt.Sprintf(msg, args...))
     }
 }
