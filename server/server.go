@@ -67,9 +67,9 @@ func (self *ircd) fatal(msg string, args ...interface{}){
     }
     self.logger.Error(msg, args...)
 }
-func (self *ircd) usage(msg string ) {
-    flag.PrintDefaults()
-    os.Stderr.WriteString(fmt.Sprintf("ERROR: %s\n", msg))
+func (self *ircd) usage(msg string ) error {
+    self.config.Flags.PrintDefaults()
+    return errors.New(fmt.Sprintf("ERROR: %s\n", msg))
 }
 func (self *ircd) parseArgs(args []string) error {
     self.config = config.NewConfig("gosch", self.version)
@@ -112,13 +112,11 @@ func (self *ircd) parseArgs(args []string) error {
     }
     tmp := self.config.GetInt("port")
     if tmp > int64(^uint16(0)) {
-        self.usage("the specified port is invalid")
-        return ircError{-1, "invalid port"}
+        return self.usage("the specified port is invalid")
     }
     crtflag := self.config.Get("certfile")
     if crtflag == nil {
-        self.usage("please specify a certificate file. Or use '-selfsigned' to generate one")
-        return  ircError{-2, "invalid cert file"}
+        return self.usage("please specify a certificate file. Or use '-selfsigned' to generate one")
     }
     crt := crtflag.String()
     _ , err = os.Stat(crt)
@@ -127,11 +125,10 @@ func (self *ircd) parseArgs(args []string) error {
             self.log("creating self signed tls certificate")
             if err := util.MakeSelfSignedPemFile(crt); err != nil {
                 self.log("cannot make self signed cert: %s\n", err)
-                return ircError{-3, "create self signed cert"}
+                return errors.New("creating self signed certificate failed")
             }
         } else {
-            self.usage("the certfificate file does not exist")
-            return ircError{-4, "cert does not exist"}
+            return self.usage("the certificate file does not exist")
         }
     }
     return nil
