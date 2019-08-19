@@ -78,30 +78,14 @@ func (self *ircd) parseArgs(args []string) error {
         return err
     }
     self.logger.SetLogLevel(util.LogLevel(self.config.DebugLevel))
-    if self.config.Flags.NArg() > 0 {
-        fmt.Printf("ERROR: additional unknown arguments: %v\n", self.config.Flags.Args())
+    if narg := self.config.Flags.NArg(); narg > 0 {
+        args := self.config.Flags.Args()
+        fmt.Printf("ERROR: additional %d unknown arguments: %v\n", narg, args)
+        for i := range args{
+            fmt.Printf("unknown: \"%v\"\n", args[i])
+        }
         self.config.Flags.PrintDefaults()
         return errors.New("unkown arguments")
-    }
-    if self.config.IsSet("daemon"){
-        //Experimental: forkexec does not work and C.daemon() does something bad
-        //remove --daemon from flags, and forkexec ourselves
-        cmdargs := make([]string, self.config.Flags.NFlag()+ self.config.Flags.NArg() + 1)
-        cmdargs[0] = os.Args[0]
-        self.config.Flags.Visit(func(flg *flag.Flag) {
-            if flg.Name != "daemon" {
-                cmdargs = append(cmdargs, fmt.Sprintf("--%s %v", flg.Name, flg.Value))
-            }
-        })
-        if self.config.Flags.NArg() > 0 {
-            cmdargs = append(cmdargs, self.config.Flags.Args()...)
-        }
-        self.log("going to background")
-        err = util.CDaemonize()
-        if err != nil {
-            self.log("error going to background: %s", err)
-            os.Exit(-1)
-        }
     }
     if logf := self.config.Get("logfile"); self.config.IsSet("logfile") {
         fd, err := os.OpenFile(logf.String(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -130,6 +114,35 @@ func (self *ircd) parseArgs(args []string) error {
         } else {
             return self.usage("the certificate file does not exist")
         }
+    }
+    if self.config.IsSet("daemon"){
+        //remove --daemon from flags, and forkexec ourselves
+        cmdargs := make([]string, 1)
+        cmdargs[0] = os.Args[0]
+        self.config.Flags.Visit(func(flg *flag.Flag) {
+            if flg.Name != "daemon" {
+                cmdargs = append(cmdargs, fmt.Sprintf("-%s", flg.Name))
+                if flg.Value.String() != "true" {
+                    cmdargs = append(cmdargs, fmt.Sprintf("%v", flg.Value))
+                }
+            }
+        })
+        if self.config.Flags.NArg() > 0 {
+            cmdargs = append(cmdargs, self.config.Flags.Args()...)
+        }
+        pwd, err := os.Getwd()
+        if err != nil {
+            self.log("error getting working directory: %s", err)
+            os.Exit(-1)
+        }
+        self.log("going to background")
+        pid, err := util.Daemonize(cmdargs,pwd)
+        if err != nil {
+            self.log("error going to background: %s", err)
+            os.Exit(-1)
+        }
+        self.log("daemon pid is %d", pid)
+        os.Exit(0)
     }
     return nil
 }

@@ -5,34 +5,39 @@ import (
     "syscall"
     "os"
     "fmt"
+    "path"
 )
-func Daemonize(cmdline []string, user, workdir string) (pid int, err error) {
-
-    fd, err := os.OpenFile("output.log", os.O_RDWR|os.O_CREATE, 0644)
+//XXX Daemonize has side effect of closing stdout in parent process
+// we should double fork
+func Daemonize(cmdline []string, workdir string) (pid int, err error) {
+    null, err := os.Open("/dev/null")
     if  err != nil {
         return -1, err
     }
-    os.Stdin.Close()
-    os.Stdout.Close()
-    os.Stderr.Close()
-    f := int(fd.Fd())
-    syscall.Dup2(f, int(os.Stdin.Fd()))
-    syscall.Dup2(f, int(os.Stdout.Fd()))
-    syscall.Dup2(f, int(os.Stderr.Fd()))
+    f := int(null.Fd())
     os.Stdout.WriteString("test")
-    fmt.Println("duped all file descriptors")
+    exe := path.Join(workdir, cmdline[0])
     attr := &syscall.ProcAttr{
-        //Dir: workdir,
+        Dir: workdir,
+        Files: []uintptr{uintptr(f),uintptr(f), uintptr(f)},
         Sys: &syscall.SysProcAttr{
             //Chroot: workdir,
             Setsid: true,
             Setpgid: false,
-            Pgid: 0,
             Foreground: false,
             //Noctty: true, //XXX this gives bad file descriptor
         },
     }
-    fmt.Println("attr %v", attr)
-    //return  syscall.ForkExec(cmdline[0], cmdline[1:], attr)
-    return -1, nil
+    fmt.Println("attr ", attr)
+    fmt.Println("exe ", exe)
+    fmt.Println("cmdline ", cmdline)
+
+    os.Stdin.Close()
+    os.Stdout.Close()
+    os.Stderr.Close()
+    syscall.Dup2(f, int(os.Stdin.Fd()))
+    syscall.Dup2(f, int(os.Stdout.Fd()))
+    syscall.Dup2(f, int(os.Stderr.Fd()))
+    fmt.Println("duped all file descriptors")
+    return  syscall.ForkExec(exe, cmdline, attr)
 }
