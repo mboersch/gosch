@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+type clientMessage struct {
+	irc.Message
+	source *ircclient
+}
+
 type ircclient struct {
 	server   *ircd
 	channels map[string]*ircchannel
@@ -40,10 +45,6 @@ type ircclient struct {
 	badBehavior                  int
 	awayMessage                  string
 }
-type clientMessage struct {
-	irc.Message
-	source *ircclient
-}
 
 // ircclient
 func NewClient(conn net.Conn, server *ircd) *ircclient {
@@ -54,7 +55,7 @@ func NewClient(conn net.Conn, server *ircd) *ircclient {
 	rv.lastPing = -1
 	h := sha256.Sum256([]byte(rv.id))
 	rv.hashedname = fmt.Sprintf("%x", h)
-	rv.outQueue = make(chan string)
+	rv.outQueue = make(chan string, 10)
 	rv.channels = make(map[string]*ircchannel)
 	addr := strings.Split(rv.id, ":")
 	rv.hostname = "unknown"
@@ -684,6 +685,7 @@ func (self *ircclient) writeIO() {
 	for self.done == false {
 		select {
 		case msg := <-self.outQueue:
+			self.trace("writeIO: buffered %d available %d", self.connwriter.Buffered(), self.connwriter.Available())
 			if msg == "" {
 				continue
 			}
@@ -700,7 +702,7 @@ func (self *ircclient) writeIO() {
 			if err = self.connwriter.Flush(); err != nil {
 				self.Kill("flush failed: %s", err)
 			}
-			self.trace("Sent %s", strconv.QuoteToASCII(msg))
+			//TODO this might contain PRIVMSG: self.trace("Sent %s %s %s ...", *tmp.Prefix(), *tmp.Command(), *tmp.First())
 			self.lastActivity = time.Now().Unix()
 		}
 	}

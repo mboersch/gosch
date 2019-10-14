@@ -180,8 +180,7 @@ func (self *ircd) deliverToChannel(tgt *string, msg *clientMessage) {
 				continue
 			}
 		}
-		self.trace("Sending %s %v", client.id, msg)
-		client.outQueue <- msg.Raw()
+		client.send( msg.Raw())
 	}
 	return
 }
@@ -219,18 +218,18 @@ func (self *ircd) deliver(msg *clientMessage) {
 				if cl.IsAway() {
 					msg.source.numericReply(RPL_AWAY, cl.nickname, cl.awayMessage)
 				}
-				cl.outQueue <- msg.Raw()
+				cl.send(msg.Raw())
 			}
 		} else {
 			// :prefix CMD :trailing, only interesting for the current client?
-			msg.source.outQueue <- msg.Raw()
+			msg.source.send(msg.Raw())
 		}
 	case RPL_TOPIC.String(), RPL_TOPICWHOTIME.String():
 		if msg.NumParameters() >= 2 {
 			if IsChannelName(msg.Parameters()[1]) {
 				self.deliverToChannel(&msg.Parameters()[1], msg)
 			} else if cl := self.findClientByNick(msg.Parameters()[1]); cl != nil {
-				cl.outQueue <- msg.Raw()
+				cl.send(msg.Raw())
 			}
 		}
 	}
