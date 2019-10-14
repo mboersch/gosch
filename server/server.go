@@ -157,7 +157,7 @@ func (self *ircd) getChannel(name string) *ircchannel {
 	}
 	return nil
 }
-func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) {
+func (self *ircd) deliverToChannel(tgt *string, msg *clientMessage) {
 	self.debug("delivering to %s: %v", *tgt, msg)
 	ch := self.getChannel(*tgt)
 	if ch == nil {
@@ -172,29 +172,29 @@ func (self *ircd) deliverToChannel(tgt *string, msg *ircmessage) {
 	self.trace("deliver ch=%v, members=%v", ch, ch.members)
 	for _, client := range ch.members {
 		if client == msg.source {
-			if msg.command == "PRIVMSG" || msg.command == "NOTICE" {
+			if *msg.Command() == "PRIVMSG" || *msg.Command() == "NOTICE" {
 				continue
 			}
-			if msg.command == "QUIT" {
+			if *msg.Command() == "QUIT" {
 				self.trace("skipping client=%v msg=%v", client.id, msg)
 				continue
 			}
 		}
 		self.trace("Sending %s %v", client.id, msg)
-		client.outQueue <- msg.GetRaw()
+		client.outQueue <- msg.Raw()
 	}
 	return
 }
-func (self *ircd) deliver(msg *ircmessage) {
+func (self *ircd) deliver(msg *clientMessage) {
 	//disseminate the client message, e.g. from client to channel etc
 	//channels multiplex: JOIN, MODE, KICK, PART, QUIT, PRIVMSG/NOTICE
 	//TODO NOTICE must not send any error replies
-	msg.prefix = msg.source.getIdent()
-	switch msg.command {
+	msg.SetPrefix(msg.source.getIdent())
+	switch cmd := *msg.Command(); cmd {
 	case "JOIN", "PART", "KICK", "MODE", "QUIT", "PRIVMSG", "NOTICE":
 		// XXX locking channels/members ?
 		if msg.NumParameters() > 0 {
-			tgt := msg.FirstParameter()
+			tgt := msg.First()
 			// :prefix CMD #target
 			//self.log("tgt=%v, validChannelName=%v", tgt, IsChannelName(tgt))
 			if IsChannelName(*tgt) {
@@ -203,7 +203,7 @@ func (self *ircd) deliver(msg *ircmessage) {
 				// :prefix CMD nick/ident
 				//must be client/user
 				//TODO <msgtarget> might be a hostmask ("*.foobar") for OP
-				if msg.command != "PRIVMSG" && msg.command != "NOTICE" {
+				if cmd != "PRIVMSG" && cmd != "NOTICE" {
 					self.log("ERROR: got directed message that is not privmsg/notice!: %v", msg)
 					return
 				}
@@ -219,18 +219,18 @@ func (self *ircd) deliver(msg *ircmessage) {
 				if cl.IsAway() {
 					msg.source.numericReply(RPL_AWAY, cl.nickname, cl.awayMessage)
 				}
-				cl.outQueue <- msg.GetRaw()
+				cl.outQueue <- msg.Raw()
 			}
 		} else {
 			// :prefix CMD :trailing, only interesting for the current client?
-			msg.source.outQueue <- msg.GetRaw()
+			msg.source.outQueue <- msg.Raw()
 		}
 	case RPL_TOPIC.String(), RPL_TOPICWHOTIME.String():
 		if msg.NumParameters() >= 2 {
-			if IsChannelName(msg.parameters[1]) {
-				self.deliverToChannel(&msg.parameters[1], msg)
-			} else if cl := self.findClientByNick(msg.parameters[1]); cl != nil {
-				cl.outQueue <- msg.GetRaw()
+			if IsChannelName(msg.Parameters()[1]) {
+				self.deliverToChannel(&msg.Parameters()[1], msg)
+			} else if cl := self.findClientByNick(msg.Parameters()[1]); cl != nil {
+				cl.outQueue <- msg.Raw()
 			}
 		}
 	}

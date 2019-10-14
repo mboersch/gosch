@@ -3,7 +3,7 @@
 package irc
 
 // the main IRC definitions
-// see doc/*.txt
+// see doc/rfc*.txt for spec
 import (
 	"fmt"
 	"strings"
@@ -216,9 +216,15 @@ var NumericMap = map[NumericReply]string{
 }
 
 type Message interface {
-	getRaw() *string
-	getPrefix() *string
-	getCommand() *string
-	getParameters() []*string
-	getTrailing() *string
+	Raw() string
+	Prefix() *string
+	SetPrefix(string)
+	Command() *string
+	Parameters() []string
+	ParameterString() string //concatenation of all parameters
+	String() string //debugging
+	NumParameters() int
+	First() *string
+	Last() *string
+	Valid() bool
 }
