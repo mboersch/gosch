@@ -22,14 +22,6 @@ const (
 	SERVER_VERSION string = "0.0.1"
 )
 
-type ircError struct {
-	code int
-	msg  string
-}
-
-func (err ircError) Error() string {
-	return fmt.Sprintf("IRC-ERROR: %d: %s", err.code, err.msg)
-}
 func isNumeric(reply string) bool {
 	if _, err := strconv.Atoi(reply); err == nil {
 		return true

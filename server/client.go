@@ -719,9 +719,9 @@ func (self *ircclient) readIO() {
 			return 0, nil, nil
 		}
 		if idx == -1 {
-			return len(data), nil, ircError{-1,
-				fmt.Sprintf("no LN separator in data: %s",
-					strconv.QuoteToASCII(string(data)))}
+			return len(data),
+				nil,
+				errors.New(fmt.Sprintf("no LN separator in data: %s", strconv.QuoteToASCII(string(data))))
 		}
 		advance = idx + 1
 		if idx > 0 && data[idx-1] == byte('\r') {
