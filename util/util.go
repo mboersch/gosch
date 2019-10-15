@@ -46,7 +46,7 @@ func MakeSelfSignedCert(keylength int) (string, error) {
 			x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{hostname},
+		DNSNames:              []string{hostname, "localhost", "127.0.0.1"},
 		IsCA:                  true,
 	}
 	if len(hostname) > 0 {

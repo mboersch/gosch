@@ -43,7 +43,7 @@ func waitSome(duration time.Duration, callback func()) {
 // connect to ssl server on localhost
 func startClient(t *testing.T) {
 	t.Log("Client connecting to localhost:6697")
-	conn, err := tls.Dial("tcp", "localhost:6697", nil)
+	conn, err := tls.Dial("tcp", "localhost:6697", &tls.Config{InsecureSkipVerify: true},)
 	if err != nil {
 		t.Errorf("tls.Dial failed: %s", err)
 		return
