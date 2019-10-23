@@ -42,6 +42,15 @@ type ircd struct {
 	servername string
 	listenSock net.Listener
 	isRunning  bool
+	onShutdown func()
+	onRunning  func()
+}
+
+func (self *ircd) OnShutdown(callback func()) {
+	self.onShutdown = callback
+}
+func (self *ircd) OnRunning(callback func()) {
+	self.onRunning = callback
 }
 
 func (self *ircd) trace(msg string, args ...interface{}) {
@@ -345,6 +354,11 @@ func (self *ircd) Run() {
 	hostnames, err := net.LookupHost(myhost)
 	if err != nil {
 		self.servername = hostnames[0]
+	}
+	if self.onRunning != nil {
+		self.trace("-> onRunning")
+		self.onRunning()
+		self.onRunning = nil
 	}
 	// handle network requests
 	for {

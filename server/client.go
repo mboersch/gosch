@@ -447,7 +447,7 @@ func (self *ircclient) handleMessage(msg *clientMessage) {
 				self.numericReply(irc.ERR_NOTONCHANNEL, tgt)
 				return
 			}
-			self.server.deliver(self.makeMessage(":%s PART %s :%s", self.getIdent(), tgt, msg.Last()))
+			self.server.deliver(self.makeMessage(":%s PART %s :%s", self.getIdent(), tgt, *msg.Last()))
 			if !self.server.partChannel(tgt, self) {
 				self.log("ERROR cannot part channel %s", tgt)
 			}

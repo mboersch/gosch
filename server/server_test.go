@@ -8,7 +8,10 @@ import (
 	"os"
 	"time"
 	"crypto/tls"
+	"bufio"
+	"fmt"
 )
+
 func setupServer() (rv *ircd,  err error){
 	certfile, err  := ioutil.TempFile("","TestGoschServer*")
 	if err != nil {
@@ -28,27 +31,72 @@ func setupServer() (rv *ircd,  err error){
 	rv, err = NewServer(args)
 	return rv, err
 }
-func waitSome(duration time.Duration, callback func()) {
-	//async wait, then call callback
-	t := time.NewTimer(duration * time.Second)
-	go func() {
-		select {
-		case _ = <-t.C:
-			defer callback()
-			return
-		}
-	}()
-
-}
 // connect to ssl server on localhost
-func startClient(t *testing.T) {
-	t.Log("Client connecting to localhost:6697")
+func startClient(t *testing.T, clNum int, ctrl chan bool) error {
+	done := false
+	log := func(msg string, args ...interface{}) error{
+		t.Logf("client%d: %s", clNum, fmt.Sprintf(msg, args...))
+		return nil
+	}
+	die := func(msg string, args ...interface{}) error {
+		t.Errorf("client%d: %s", clNum, fmt.Sprintf(msg, args...))
+		ctrl <- false
+		done = true
+		return nil
+	}
+	log("Client connecting to localhost:6697")
 	conn, err := tls.Dial("tcp", "localhost:6697", &tls.Config{InsecureSkipVerify: true},)
 	if err != nil {
-		t.Errorf("tls.Dial failed: %s", err)
-		return
+		return die("tls.Dial failed: %s", err)
 	}
 	defer conn.Close()
+	out := bufio.NewWriter(conn)
+	if out == nil {
+		return die("cannot create bufio.NewWriter()")
+	}
+	reader := bufio.NewReader(conn)
+	if reader == nil {
+		return die("cannot create bufio.NewReader()")
+	}
+
+	send := func(msg string, args ...interface{}) {
+		tmp := fmt.Sprintf(msg, args...)
+		out.WriteString(fmt.Sprintf("%s\r\n", tmp))
+		if err := out.Flush(); err != nil {
+			die("sending failed %s", err)
+		}
+	}
+	//consume input
+	go func () error {
+		for done == false {
+			buf, err := reader.ReadString('\n')
+			if err != nil {
+				if done {
+					ctrl <- true
+					return log("disconnected")
+				}
+				return die("read error(%T): %s", err, err)
+			}
+			_ = len(buf)
+			//log("read: %s", buf)
+		}
+		return nil
+	}()
+	nick := fmt.Sprintf("testConn%d", clNum)
+	send("USER %s +mode unused :Test Connection %d", nick, clNum)
+	send("NICK %s", nick)
+	send("JOIN #test_chan")
+	for i:=0; i< 1000;i++ {
+		send("PRIVMSG #test_chan :test message number %i", i)
+		if done {
+			return die("done is set!")
+		}
+	}
+
+	done=true
+	log("done")
+	ctrl <- true
+	return nil
 }
 func TestClientToServer(t *testing.T) {
 	ircd, err := setupServer()
@@ -57,7 +105,45 @@ func TestClientToServer(t *testing.T) {
 		return
 	}
 	t.Logf("certfile: %s", ircd.config.Get("certfile"))
-	waitSome(10, ircd.Stop)
-	waitSome(1, func() { go startClient(t)})
-	ircd.Run();//blocking main
+
+	//run async test with timeouts
+	numClients := 5
+	ctrl := make(chan bool)
+	ircd.OnRunning(func() {
+		t.Log("starting clients!")
+		for i := 0; i< numClients; i++ {
+			go startClient(t, i, ctrl)
+		}
+	})
+
+	tmr := time.NewTimer(5 * time.Second)
+	go func() {
+		select {
+		case _ = <-tmr.C:
+			t.Log("Timeout reached!")
+			ircd.Stop()
+			return
+		}
+	}()
+	go func() {
+		for numClients > 0 {
+			select {
+			case ok := <-ctrl:
+				if !ok {
+					ircd.Stop()
+					tmr.Stop()
+					t.Errorf("one client reported errors")
+					return
+				}
+				numClients--
+				if numClients == 0 {
+					t.Logf("all clients done")
+					tmr.Stop()
+					ircd.Stop()
+					return
+				}
+			}
+		}
+	}()
+	ircd.Run(); //must be on main thread?
 }

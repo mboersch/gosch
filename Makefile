@@ -4,4 +4,4 @@ gosch:
 netbsd:
 	GOOS=netbsd GOARCH=amd64 go build -o gosch.nb64
 test:
-	go test ./...
+	go test ./... -v -count 1
