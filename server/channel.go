@@ -6,6 +6,7 @@ import (
 	"github.com/mboersch/gosch/irc"
 	"strings"
 	"time"
+	"fmt"
 )
 
 //ircchannel
@@ -21,6 +22,8 @@ type ircchannel struct {
 	secretKey  string
 	created    time.Time
 	creator    *ircclient
+	updater    chan interface{}
+
 	//TODO exception masks
 }
 
@@ -30,18 +33,44 @@ func NewChannel(name string) *ircchannel {
 	nuch.members = make(map[string]*ircclient)
 	nuch.userFlags = make(map[*ircclient]string)
 	nuch.created = time.Now()
+	nuch.updater = make(chan interface{})
+	go func() {
+		for {
+			//centrally dispatch/udpate values
+			select  {
+			case val := <-nuch.updater:
+				if f, ok := val.(func()); ok {
+					f()
+				} else {
+					panic(fmt.Sprintf("Unknown async callback: %T %v",val, val))
+				}
+			}
+		}
+	}()
 	return nuch
 }
+func (self *ircchannel) asyncUpdate(thunk func()) {
+	rv := make(chan bool)
+	self.updater <- func() {
+		thunk()
+		rv <- true
+	}
+	<-rv
+}
 func (self *ircchannel) RemoveClient(client *ircclient) {
-	delete(client.channels, self.name)
-	delete(self.members, client.nickname)
-	delete(self.userFlags, client)
+	self.asyncUpdate(func() {
+		delete(client.channels, self.name)
+		delete(self.members, client.nickname)
+		delete(self.userFlags, client)
+	})
 }
 func (self *ircchannel) AddClient(client *ircclient) {
-	self.members[client.nickname] = client
-	self.userFlags[client] = ""
-	client.trace("[%s] %s joined %s", client.id, client.nickname, self.name)
-	client.channels[self.name] = self
+	self.asyncUpdate(func() {
+		self.members[client.nickname] = client
+		self.userFlags[client] = ""
+		client.trace("[%s] %s joined %s", client.id, client.nickname, self.name)
+		client.channels[self.name] = self
+	})
 }
 
 // user flags
@@ -103,12 +132,12 @@ func (self *ircchannel) clearMode(mod rune) {
 }
 
 func (self *ircchannel) GetMembers() []*ircclient {
-	rv := make([]*ircclient, len(self.members))
-	i := 0
-	for _, mem := range self.members {
-		rv[i] = mem
-		i += 1
-	}
+	rv := make([]*ircclient, 0)
+	self.asyncUpdate(func() {
+		for _, mem := range self.members {
+			rv = append(rv, mem)
+		}
+	})
 	return rv
 }
 func (self *ircchannel) GetMode() string {
@@ -116,12 +145,16 @@ func (self *ircchannel) GetMode() string {
 }
 
 func (self *ircchannel) IsMember(nick *ircclient) bool {
-	for _, user := range self.members {
-		if nick == user {
-			return true
+	rv := false
+	self.asyncUpdate(func() {
+		for _, user := range self.members {
+			if nick == user {
+				rv = true
+				break
+			}
 		}
-	}
-	return false
+	})
+	return rv
 }
 func (self *ircchannel) GetCreator() *ircclient {
 	return self.creator
@@ -146,4 +179,26 @@ func IsValidChannelName(nameToTest string) bool {
 		return false
 	} //Ctrl-G
 	return true
+}
+func (ch *ircchannel) SendMessage(msg *clientMessage) {
+	if !ch.IsMember(msg.source) {
+		msg.source.debug("deliver: %s is not a member of %s", msg.source.nickname, ch.name)
+		msg.source.numericReply(irc.ERR_CANNOTSENDTOCHAN, ch.name)
+		return
+	}
+	ch.asyncUpdate(func() {
+		for _, client := range ch.members {
+			if client == msg.source {
+				if *msg.Command() == "PRIVMSG" || *msg.Command() == "NOTICE" {
+					continue
+				}
+				if *msg.Command() == "QUIT" {
+					continue
+				}
+			}
+			if !client.IsDone() {
+				client.send( msg.Raw())
+			}
+		}
+	})
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 )
 
 type clientMessage struct {
@@ -44,6 +45,7 @@ type ircclient struct {
 	isBroken                     bool
 	badBehavior                  int
 	awayMessage                  string
+	mutex						 sync.Mutex
 }
 
 // ircclient
@@ -71,11 +73,17 @@ func (self *ircclient) String() string {
 	return fmt.Sprintf("<Client: %s!%s@%s>",
 		self.username, self.realname, self.id)
 }
+func (self *ircclient) SetDone() {
+	self.done = true
+}
+func (self *ircclient) IsDone() bool {
+	return self.done
+}
 func (self *ircclient) Kill(errormsg string, args ...interface{}) {
 	if len(args) > 0 {
 		errormsg = fmt.Sprintf(errormsg, args...)
 	}
-	self.done = true
+	self.SetDone()
 	self.doneMessage = errormsg
 	self.registered = false
 	if self.pingTimer != nil {
@@ -103,6 +111,7 @@ func (self *ircclient) onRegistered() {
 		server.config.IsSet("password") && len(pwd.String()) > 0 {
 		if self.password != pwd.String() {
 			self.numericReply(irc.ERR_ALREADYREGISTRED)
+			self.mutex.Unlock()
 			self.Kill("invalid password: %v", self.password)
 			return
 		}
@@ -129,7 +138,7 @@ func (self *ircclient) onTimeout() {
 	if timeout == -1 {
 		panic("Invalid timeout config read")
 	}
-	for !self.done {
+	for !self.IsDone() {
 		self.pingTimer = time.NewTimer(time.Second)
 		select {
 		case now := <-self.pingTimer.C:
@@ -269,10 +278,10 @@ func (self *ircclient) handleUserMode(msg *clientMessage) {
 	self.numericReply(irc.RPL_UMODEIS, self.mode)
 	return
 }
-func (self *ircclient) broadcastToChannel(msg *clientMessage) {
+func (self *ircclient) notifyMyPeers(msg *clientMessage) {
 	//notify all peers in my channels
 	for _, ch := range self.channels {
-		self.server.deliverToChannel(&ch.name, msg)
+		ch.SendMessage(msg)
 	}
 }
 func (self *ircclient) handleMessage(msg *clientMessage) {
@@ -319,7 +328,7 @@ func (self *ircclient) handleMessage(msg *clientMessage) {
 			return
 		}
 		if self.registered {
-			self.broadcastToChannel(self.makeMessage(":%s NICK %s", oldnick, self.nickname))
+			self.notifyMyPeers(self.makeMessage(":%s NICK %s", oldnick, self.nickname))
 		} else {
 			if len(self.username) > 0 && len(self.realname) > 0 {
 				self.onRegistered()
@@ -428,7 +437,8 @@ func (self *ircclient) handleMessage(msg *clientMessage) {
 			if i < len(keys) {
 				k = keys[i]
 			}
-			self.server.joinChannel(tgts[i], k, self)
+			ch := self.server.joinChannel(tgts[i], k, self)
+			self.onJoin(ch)
 		}
 
 	case "PART":
@@ -612,7 +622,7 @@ func (self *ircclient) namReply(channel string) {
 	needspc := false
 	tmp := ch.GetMembers()
 	self.trace("members=%v", tmp)
-	for _, cl := range ch.GetMembers() {
+	for _, cl := range tmp {
 		u := cl.nickname
 		if len(u) > 0 {
 			if needspc {
@@ -631,20 +641,18 @@ func (self *ircclient) namReply(channel string) {
 	self.numericReply(irc.RPL_NAMREPLY, "=", channel, users)
 	self.numericReply(irc.RPL_ENDOFNAMES, channel)
 }
-func (self *ircclient) onJoin(channel string) {
-	ch := self.server.getChannel(channel)
-	self.trace("onJoin %v: %s (%s)", ch, self.id, self.nickname)
+func (self *ircclient) onJoin(ch *ircchannel) {
 	if ch == nil {
-		self.Kill("join on non-existing channel %s", channel)
+		self.Kill("join on non-existing channel %v", ch )
 		return
 	}
-	//self.send(":%s JOIN %s", self.getIdent(), channel)
-	self.server.deliver(self.makeMessage(":%s JOIN %s ", self.getIdent(), channel))
-	self.namReply(channel)
+	self.trace("onJoin %s: %s (%s)", ch.name, self.id, self.nickname)
+	self.server.deliver(self.makeMessage(":%s JOIN %s ", self.getIdent(), ch.name))
+	self.namReply(ch.name)
 	if len(ch.topic) < 1 {
-		self.numericReply(irc.RPL_NOTOPIC, channel)
+		self.numericReply(irc.RPL_NOTOPIC, ch.name)
 	} else {
-		self.numericReply(irc.RPL_TOPIC, channel, ch.topic)
+		self.numericReply(irc.RPL_TOPIC, ch.name, ch.topic)
 	}
 	if ch.IsOperator(self) {
 		self.server.deliverToChannel(&ch.name,
@@ -670,9 +678,6 @@ func (self *ircclient) numericReply(num irc.NumericReply, args ...interface{}) {
 	self.send(":%s %s %s %s", self.server.servername, num.String(), nick, msg)
 }
 func (self *ircclient) send(tmpl string, args ...interface{}) {
-	if self.done {
-		return
-	}
 	self.trace(tmpl, args...)
 	self.outQueue <- fmt.Sprintf(tmpl, args...)
 }
@@ -682,10 +687,14 @@ func (self *ircclient) Start() {
 }
 
 func (self *ircclient) writeIO() {
-	for self.done == false {
+	for true {
 		select {
 		case msg := <-self.outQueue:
 			self.trace("writeIO: buffered %d available %d", self.connwriter.Buffered(), self.connwriter.Available())
+			if self.IsDone() {
+				self.trace("done is set")
+				break
+			}
 			if msg == "" {
 				continue
 			}
@@ -735,22 +744,25 @@ func (self *ircclient) readIO() {
 		return advance, token, err
 	}
 	scanner.Split(crlnSplit)
-	for !self.done {
-		self.log("connect from %s [%s]", self.id, self.hostname)
-		for scanner.Scan() {
-			msg, err := irc.NewMessage(scanner.Text())
-			if err != nil {
-				self.Kill("invalid irc-message: %v", err)
-				break
-			}
-			self.handleMessage(&clientMessage{msg, self})
-		}
-		if scanner.Err() != nil {
-			self.log("got error while reading from client: %v", scanner.Err())
-		}
+	self.log("connect from %s [%s]", self.id, self.hostname)
+	for scanner.Scan() {
 		//read done
-		if !self.done {
+		if self.IsDone() {
 			self.Kill("readIO done")
+			break
 		}
+		msg, err := irc.NewMessage(scanner.Text())
+		if err != nil {
+			self.Kill("invalid irc-message: %v", err)
+			break
+		}
+		self.handleMessage(&clientMessage{msg, self})
+	}
+	if scanner.Err() != nil {
+		self.log("got error while reading from client: %v", scanner.Err())
+	}
+	//read done
+	if !self.IsDone() {
+		self.Kill("readIO done")
 	}
 }

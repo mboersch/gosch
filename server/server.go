@@ -52,7 +52,11 @@ func (self *ircd) OnShutdown(callback func()) {
 func (self *ircd) OnRunning(callback func()) {
 	self.onRunning = callback
 }
-
+func (self *ircd) IsRunning() bool {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	return self.isRunning
+}
 func (self *ircd) trace(msg string, args ...interface{}) {
 	self.logger.Trace(msg, args...)
 }
@@ -165,24 +169,7 @@ func (self *ircd) deliverToChannel(tgt *string, msg *clientMessage) {
 		self.debug("deliver: ignoring msg on non-existing channel %s", *tgt)
 		return
 	}
-	if !ch.IsMember(msg.source) {
-		self.debug("deliver: %s is not a member of %s", msg.source.nickname, *tgt)
-		msg.source.numericReply(ERR_CANNOTSENDTOCHAN, ch.name)
-		return
-	}
-	self.trace("deliver ch=%v, members=%v", ch, ch.members)
-	for _, client := range ch.members {
-		if client == msg.source {
-			if *msg.Command() == "PRIVMSG" || *msg.Command() == "NOTICE" {
-				continue
-			}
-			if *msg.Command() == "QUIT" {
-				self.trace("skipping client=%v msg=%v", client.id, msg)
-				continue
-			}
-		}
-		client.send( msg.Raw())
-	}
+	ch.SendMessage(msg)
 	return
 }
 func (self *ircd) deliver(msg *clientMessage) {
@@ -236,6 +223,8 @@ func (self *ircd) deliver(msg *clientMessage) {
 	}
 }
 func (self *ircd) findClientByNick(nick string) *ircclient {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
 	for _, cl := range self.clients {
 		if cl.nickname == nick {
 			return cl
@@ -270,24 +259,21 @@ func (self *ircd) onDisconnect(client *ircclient) error {
 				client, ch)
 		}
 		self.trace("onDisconnect: removing from %v members=%v", ch.name, ch.members)
-		if len(ch.members) > 0 {
-			self.deliverToChannel(&ch.name,
-				client.makeMessage(":%s QUIT :%s", client.getIdent(), client.doneMessage))
-		}
 		ch.RemoveClient(client)
+		if len(ch.members) > 0 {
+			ch.SendMessage(client.makeMessage(":%s QUIT :%s", client.getIdent(), client.doneMessage))
+		}
 	}
 	return nil
 }
 func (self *ircd) cleanup(force bool) {
-	self.mutex.Lock()
-	defer self.mutex.Unlock()
 	for _, cl := range self.clients {
-		if force || cl.done {
-			if force {
-				cl.done = true
-			}
-			self.log("[%s] disconnected", cl.id)
+		if force {
+			cl.SetDone()
+		}
+		if cl.IsDone() {
 			self.onDisconnect(cl)
+			self.log("[%s] disconnected", cl.id)
 		}
 	}
 }
@@ -297,27 +283,27 @@ func (self *ircd) handleSignals() {
 	var nint int = 0
 	go func() {
 		for sig := range sigs {
-			switch sig {
-			case os.Interrupt, os.Kill:
-				self.fatal("received signal %v. shutting down.", sig)
+			self.fatal("received signal %v. shutting down.", sig)
+			nint++
+			if nint > 1 {
+				self.fatal("forcing exit")
+				os.Exit(1)
+			} else {
 				self.Stop()
-				nint++
-				if nint > 1 {
-					os.Exit(1)
-				}
+				self.cleanup(true)
 			}
 		}
 	}()
 }
 func (self *ircd) Stop() {
-	if !self.isRunning {
-		return
-	}
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
 	self.log("Stopping I/O")
-	self.isRunning = false
 	if self.listenSock != nil {
 		_ = self.listenSock.Close()
+		self.listenSock = nil
 	}
+	self.isRunning = false
 }
 func (self *ircd) Run() {
 	self.isRunning = true
@@ -363,7 +349,7 @@ func (self *ircd) Run() {
 	// handle network requests
 	for {
 		cl, err := l.Accept()
-		if !self.isRunning {
+		if !self.IsRunning() {
 			break
 		}
 		if err != nil {
@@ -375,10 +361,11 @@ func (self *ircd) Run() {
 		self.addClient(client)
 		client.Start()
 	}
+	self.trace("forcing cleanup")
 	self.cleanup(true)
 }
 
-func (self *ircd) joinChannel(channel, key string, client *ircclient) {
+func (self *ircd) joinChannel(channel, key string, client *ircclient) *ircchannel {
 	//TODO key/password checks
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -395,7 +382,7 @@ func (self *ircd) joinChannel(channel, key string, client *ircclient) {
 		ch.SetUserFlag(client, 'O')
 		ch.SetUserFlag(client, 'o')
 	}
-	client.onJoin(channel)
+	return ch
 }
 func (self *ircd) partChannel(channel string, client *ircclient) bool {
 	self.mutex.Lock()
@@ -415,9 +402,8 @@ func (self *ircd) registerNickname(nick string, client *ircclient) bool {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 	self.debug("server: register nick %s for %v", nick, client.getIdent())
-	cl := self.findClientByNick(nick)
-	if cl != nil {
-		if cl != client {
+	for _, cl := range self.clients {
+		if cl.nickname == nick {
 			//some other client has the nick
 			self.trace("%v wants %s which is taken by %v", client.id, nick, cl.getIdent())
 			return false

@@ -4,4 +4,4 @@ gosch:
 netbsd:
 	GOOS=netbsd GOARCH=amd64 go build -o gosch.nb64
 test:
-	go test ./... -v -count 1
+	go test -race ./... -v -count 1 -test.timeout 20s

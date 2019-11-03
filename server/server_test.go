@@ -130,8 +130,9 @@ func TestClientToServer(t *testing.T) {
 			select {
 			case ok := <-ctrl:
 				if !ok {
-					ircd.Stop()
 					tmr.Stop()
+					t.Log("stopping ircd")
+					ircd.Stop()
 					t.Errorf("one client reported errors")
 					return
 				}
