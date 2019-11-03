@@ -6,7 +6,6 @@ import (
 	"github.com/mboersch/gosch/irc"
 	"strings"
 	"time"
-	"fmt"
 )
 
 //ircchannel
@@ -22,7 +21,7 @@ type ircchannel struct {
 	secretKey  string
 	created    time.Time
 	creator    *ircclient
-	updater    chan interface{}
+	updater    chan func() //async update calls
 
 	//TODO exception masks
 }
@@ -33,17 +32,13 @@ func NewChannel(name string) *ircchannel {
 	nuch.members = make(map[string]*ircclient)
 	nuch.userFlags = make(map[*ircclient]string)
 	nuch.created = time.Now()
-	nuch.updater = make(chan interface{})
+	nuch.updater = make(chan func())
 	go func() {
 		for {
 			//centrally dispatch/udpate values
 			select  {
-			case val := <-nuch.updater:
-				if f, ok := val.(func()); ok {
-					f()
-				} else {
-					panic(fmt.Sprintf("Unknown async callback: %T %v",val, val))
-				}
+			case cb := <-nuch.updater:
+				cb()
 			}
 		}
 	}()

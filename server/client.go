@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"sync"
 )
 
 type clientMessage struct {
@@ -45,7 +44,6 @@ type ircclient struct {
 	isBroken                     bool
 	badBehavior                  int
 	awayMessage                  string
-	mutex						 sync.Mutex
 }
 
 // ircclient
@@ -89,7 +87,6 @@ func (self *ircclient) Kill(errormsg string, args ...interface{}) {
 	if self.pingTimer != nil {
 		self.pingTimer.Stop()
 	}
-	self.conn.Close()
 	self.log("%s killed with: %s", self.getIdent(), strconv.QuoteToASCII(errormsg))
 	self.outQueue <- "" //make sure writeIO wakes up
 }
@@ -111,7 +108,6 @@ func (self *ircclient) onRegistered() {
 		server.config.IsSet("password") && len(pwd.String()) > 0 {
 		if self.password != pwd.String() {
 			self.numericReply(irc.ERR_ALREADYREGISTRED)
-			self.mutex.Unlock()
 			self.Kill("invalid password: %v", self.password)
 			return
 		}

@@ -88,6 +88,9 @@ func startClient(t *testing.T, clNum int, ctrl chan bool) error {
 	send("JOIN #test_chan")
 	for i:=0; i< 1000;i++ {
 		send("PRIVMSG #test_chan :test message number %i", i)
+		if (i+1) % (clNum+1) == 300 {
+			send("TOPIC #test_chan :Topic set by client %i", i)
+		}
 		if done {
 			return die("done is set!")
 		}
